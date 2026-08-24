@@ -1,0 +1,345 @@
+#pragma kernel CSMain
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Packing.hlsl"
+
+Texture2D<half4> _GBuffer2; //normals
+RWTexture2D<float4> _RW_GTBNTarget;
+
+float4 _GTBNParams1; //x-radius, y-internal max radius pixels, z-slice count, w-step count
+float4 _GTBNParams2; //x-intensity, y-unused, z-projScale, w-internal min radius pixels
+float4 _CameraViewBottomLeftCorner;
+float4 _CameraViewXExtent;
+float4 _CameraViewYExtent;
+int _LoogaGBufferNormalsAreOct;
+int _LoogaBentNormalsEnabled;
+
+half3 DecodeGBufferNormal(half3 packedNormalWS)
+{
+    if (_LoogaGBufferNormalsAreOct != 0)
+    {
+        float2 octNormalWS = Unpack888ToFloat2(packedNormalWS) * 2.0 - 1.0;
+        return half3(UnpackNormalOctQuadEncode(octNormalWS));
+    }
+
+    return normalize(packedNormalWS);
+}
+
+float3 ReconstructViewPos(float2 uv, float depth)
+{
+    float3 viewRay = _CameraViewBottomLeftCorner.xyz + _CameraViewXExtent.xyz * uv.x + _CameraViewYExtent.xyz * uv.y;
+    return viewRay * LinearEyeDepth(depth, _ZBufferParams);
+}
+
+bool IsRawFarDepth(float rawDepth)
+{
+    #if UNITY_REVERSED_Z
+        return rawDepth <= 0.000001;
+    #else
+        return rawDepth >= 0.999999;
+    #endif
+}
+
+float NormalizeDeviceDepth(float rawDepth)
+{
+    #if !UNITY_REVERSED_Z
+        return lerp(UNITY_NEAR_CLIP_VALUE, 1, rawDepth);
+    #else
+        return rawDepth;
+    #endif
+}
+
+float Hash13(float3 p)
+{
+    p = frac(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+
+half3 SampleGBufferNormalVS(float2 uv)
+{
+    half3 normalWS = DecodeGBufferNormal(_GBuffer2.SampleLevel(sampler_PointClamp, uv, 0).rgb);
+    return half3(normalize(mul((float3x3)_ViewMatrix, normalWS)));
+}
+
+bool TryReconstructSample(float2 uv, out float3 sampleViewPos)
+{
+    sampleViewPos = 0.0;
+
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+        return false;
+
+    float rawDepth = _CameraDepthTexture.SampleLevel(sampler_PointClamp, uv, 0).r;
+    if (IsRawFarDepth(rawDepth))
+        return false;
+
+    sampleViewPos = ReconstructViewPos(uv, NormalizeDeviceDepth(rawDepth));
+    return true;
+}
+
+float3 ReconstructViewGeometryNormal(float2 uv, float2 texelSize, float3 centerViewPos, float3 referenceNormalVS)
+{
+    float3 leftPos;
+    float3 rightPos;
+    float3 downPos;
+    float3 upPos;
+
+    bool hasLeft = TryReconstructSample(uv - float2(texelSize.x, 0.0), leftPos);
+    bool hasRight = TryReconstructSample(uv + float2(texelSize.x, 0.0), rightPos);
+    bool hasDown = TryReconstructSample(uv - float2(0.0, texelSize.y), downPos);
+    bool hasUp = TryReconstructSample(uv + float2(0.0, texelSize.y), upPos);
+
+    if ((!hasLeft && !hasRight) || (!hasDown && !hasUp))
+        return referenceNormalVS;
+
+    float3 dx;
+    if (hasLeft && hasRight)
+    {
+        float3 leftDerivative = centerViewPos - leftPos;
+        float3 rightDerivative = rightPos - centerViewPos;
+        dx = dot(leftDerivative, leftDerivative) < dot(rightDerivative, rightDerivative)
+            ? leftDerivative
+            : rightDerivative;
+    }
+    else
+    {
+        dx = hasRight ? rightPos - centerViewPos : centerViewPos - leftPos;
+    }
+
+    float3 dy;
+    if (hasDown && hasUp)
+    {
+        float3 downDerivative = centerViewPos - downPos;
+        float3 upDerivative = upPos - centerViewPos;
+        dy = dot(downDerivative, downDerivative) < dot(upDerivative, upDerivative)
+            ? downDerivative
+            : upDerivative;
+    }
+    else
+    {
+        dy = hasUp ? upPos - centerViewPos : centerViewPos - downPos;
+    }
+
+    if (dot(dx, dx) <= 0.000001 || dot(dy, dy) <= 0.000001)
+        return referenceNormalVS;
+
+    float3 geometryNormalVS = normalize(cross(dx, dy));
+    return dot(geometryNormalVS, referenceNormalVS) < 0.0 ? -geometryNormalVS : geometryNormalVS;
+}
+
+bool TryGetOccludingSample(float3 sampleViewPos, float3 sampleNormalVS, float3 centerViewPos, float3 centerNormalVS, float sampleRadius, float biasRadius, out float occlusionWeight, out float3 sampleDirectionVS)
+{
+    occlusionWeight = 0.0;
+    sampleDirectionVS = 0.0;
+
+    float3 delta = sampleViewPos - centerViewPos;
+    float deltaSq = dot(delta, delta);
+
+    if (deltaSq <= 0.000001 || deltaSq >= sampleRadius * sampleRadius)
+        return false;
+
+    float distance = sqrt(deltaSq);
+    sampleDirectionVS = delta / distance;
+
+    float normalDistance = dot(delta, centerNormalVS);
+    float3 tangentDelta = delta - centerNormalVS * normalDistance;
+    float tangentDistance = length(tangentDelta);
+    float planeBias = max(biasRadius * 0.02, 0.005);
+    // Crease detection strengthens real blockers, but never promotes geometry
+    // behind the center tangent plane. That distinction separates concave
+    // contacts from viewer-facing convex silhouettes.
+    float creaseWeight = saturate((1.0 - dot(centerNormalVS, sampleNormalVS) - 0.4) / 0.4);
+
+    if (normalDistance <= planeBias)
+        return false;
+
+    // Keep vertical furniture/rails from casting a whole-radius halo across flat floors.
+    // Radius still bounds the search, but contact response falls off near the object.
+    float heightAbovePlane = max(normalDistance - planeBias, 0.0);
+    float contactLimit = min(sampleRadius, max(biasRadius * 0.55, 0.10) + heightAbovePlane * 0.25);
+    float contactDistanceWeight = saturate(1.0 - tangentDistance / max(contactLimit, 0.0001));
+    contactDistanceWeight *= contactDistanceWeight;
+
+    float distanceWeight = saturate(1.0 - (distance / sampleRadius));
+    distanceWeight = lerp(distanceWeight, sqrt(distanceWeight), 0.5);
+    float contactRamp = max(biasRadius * 0.15, 0.02);
+    float heightWeight = saturate((normalDistance - planeBias) / contactRamp);
+    float angleWeight = saturate(normalDistance / max(distance, 0.0001));
+    float contactWeight = max(heightWeight * angleWeight, creaseWeight * heightWeight) * contactDistanceWeight;
+
+    occlusionWeight = distanceWeight * contactWeight;
+
+    if (occlusionWeight <= 0.000001)
+        return false;
+
+    return true;
+}
+
+[numthreads(8, 8, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    _RW_GTBNTarget.GetDimensions(width, height);
+    if (id.x >= width || id.y >= height) return;
+
+    float2 texelSize = 1.0 / float2(width, height);
+    float2 uv = (float2(id.xy) + 0.5) * texelSize;
+
+    //sample depth/normal
+    float rawDepth = _CameraDepthTexture.SampleLevel(sampler_PointClamp, uv, 0).r;
+
+    //skybox early out
+    if (IsRawFarDepth(rawDepth))
+    {
+        _RW_GTBNTarget[id.xy] = float4(0.5, 0.5, 0.5, 1);
+        return;
+    }
+
+    half3 normalWS = DecodeGBufferNormal(_GBuffer2.SampleLevel(sampler_PointClamp, uv, 0).rgb);
+    float3 vpos = ReconstructViewPos(uv, NormalizeDeviceDepth(rawDepth));
+    float3 vnormal = normalize(mul((float3x3)_ViewMatrix, normalWS));
+    float3 geometryNormalVS = ReconstructViewGeometryNormal(uv, texelSize, vpos, vnormal);
+
+    float radius = _GTBNParams1.x;
+    float maxRadiusPixels = _GTBNParams1.y;
+    int sliceCount = (int)_GTBNParams1.z;
+    int stepCount = (int)_GTBNParams1.w;
+    float intensity = _GTBNParams2.x;
+    float projScale = _GTBNParams2.z;
+    float minRadiusPixels = _GTBNParams2.w;
+
+    float radiusPixels = radius * projScale / max(abs(vpos.z), 0.001);
+    radiusPixels = clamp(radiusPixels, minRadiusPixels, maxRadiusPixels);
+    float effectiveRadius = radiusPixels * max(abs(vpos.z), 0.001) / max(projScale, 0.001);
+    float stepSize = radiusPixels / (float)stepCount;
+
+    if (radiusPixels < 0.5)
+    {
+        _RW_GTBNTarget[id.xy] = float4(normalWS * 0.5 + 0.5, 1.0);
+        return;
+    }
+
+    // Per-pixel noise based on screen position - high frequency for the bilateral blur to clean up.
+    // Avoids the world-space quantization that produced coherent banding within shared cells.
+    float noise = Hash13(float3(float2(id.xy), 0.0));
+    float sliceAngle = (PI / (float)sliceCount);
+
+    float ao = 0.0;
+    float3 bentNormalAccumVS = float3(0, 0, 0);
+    float totalSampleWeight = 0.0;
+    float totalOcclusionHitWeight = 0.0;
+    int validSliceCount = 0;
+
+    for (int i = 0; i < sliceCount; i++)
+    {
+        float phi = (i + noise) * sliceAngle;
+        float2 omega = float2(cos(phi), sin(phi));
+
+        float sliceOcclusion = 0.0;
+        float sliceSampleWeight = 0.0;
+        float sliceOcclusionHitWeight = 0.0;
+        float3 sliceBentOffsetVS = 0.0;
+
+        // Unrolling the Sides prevents branching and is much faster on the GPU
+        for (int s = 1; s <= stepCount; s++)
+        {
+            float radialJitter = Hash13(float3(float2(id.xy), (float)i * 19.19 + (float)s * 7.31));
+            float samplePixels = min(((float)s - 0.5 + radialJitter) * stepSize, radiusPixels);
+
+            //positive direction
+            float2 offsetUV1 = uv + omega * texelSize * samplePixels;
+            float3 pos1;
+
+            if (TryReconstructSample(offsetUV1, pos1))
+            {
+                sliceSampleWeight += 1.0;
+                totalSampleWeight += 1.0;
+
+                float occlusionWeight;
+                float3 sampleDirectionVS;
+                // Sample gbuffer normal directly instead of reconstructing from 4 depth taps.
+                // Normal-map detail in the sampled normal is fine here - creaseWeight only fires
+                // on large angle differences that normal maps don't typically produce.
+                float3 sampleNormalVS = SampleGBufferNormalVS(offsetUV1);
+
+                if (TryGetOccludingSample(pos1, sampleNormalVS, vpos, geometryNormalVS, effectiveRadius, radius, occlusionWeight, sampleDirectionVS))
+                {
+                    // Additive accumulation - matches how bent offset is accumulated, and gives
+                    // proper integration of multiple occluders along a slice instead of just keeping the strongest.
+                    sliceOcclusion += occlusionWeight;
+                    sliceOcclusionHitWeight += 1.0;
+                    totalOcclusionHitWeight += 1.0;
+                    if (_LoogaBentNormalsEnabled != 0)
+                        sliceBentOffsetVS -= sampleDirectionVS * occlusionWeight;
+                }
+            }
+
+            //negative direction
+            float2 offsetUV2 = uv - omega * texelSize * samplePixels;
+            float3 pos2;
+
+            if (TryReconstructSample(offsetUV2, pos2))
+            {
+                sliceSampleWeight += 1.0;
+                totalSampleWeight += 1.0;
+
+                float occlusionWeight;
+                float3 sampleDirectionVS;
+                float3 sampleNormalVS = SampleGBufferNormalVS(offsetUV2);
+
+                if (TryGetOccludingSample(pos2, sampleNormalVS, vpos, geometryNormalVS, effectiveRadius, radius, occlusionWeight, sampleDirectionVS))
+                {
+                    sliceOcclusion += occlusionWeight;
+                    sliceOcclusionHitWeight += 1.0;
+                    totalOcclusionHitWeight += 1.0;
+                    if (_LoogaBentNormalsEnabled != 0)
+                        sliceBentOffsetVS -= sampleDirectionVS * occlusionWeight;
+                }
+            }
+        }
+
+        // Blend hit-only and all-sample normalization. Hit-only had punch but made rings;
+        // all-sample was stable but too weak. This keeps strength without hard step boundaries.
+        float hitDenominator = max(sliceOcclusionHitWeight, 1.0);
+        float allSampleDenominator = max(sliceSampleWeight, 1.0);
+        float occlusionDenominator = lerp(hitDenominator, allSampleDenominator, 0.15);
+        float avgSliceOcclusion = sliceSampleWeight > 0.0 ? saturate((sliceOcclusion / occlusionDenominator) * 2.75) : 0.0;
+        float sliceVisibility = 1.0 - saturate(avgSliceOcclusion);
+        ao += sliceVisibility;
+
+        // Accumulate bent offset directly without per-slice normalization.
+        // This lets heavily-occluded slices push the final bent normal further from vnormal,
+        // which is what we want - response should be proportional to occlusion strength.
+        if (_LoogaBentNormalsEnabled != 0)
+            bentNormalAccumVS += sliceBentOffsetVS;
+        validSliceCount++;
+    }
+
+    if (validSliceCount == 0)
+    {
+        _RW_GTBNTarget[id.xy] = float4(normalWS * 0.5 + 0.5, 1.0);
+        return;
+    }
+
+    float visibility = ao / (float)validSliceCount;
+    float occlusionAmountRaw = saturate(1.0 - visibility);
+    float finalOcclusion = saturate(pow(max(0.0, 1.0 - occlusionAmountRaw), max(intensity, 0.0001)));
+
+    // Bend the detailed surface normal by the accumulated offset, then normalize once.
+    // Anchoring on vnormal (gbuffer normal with normal-map detail) preserves grooves;
+    // geometryNormalVS was used for occlusion testing so creases don't self-shadow.
+    float3 bentNormalWS = normalWS;
+    if (_LoogaBentNormalsEnabled != 0)
+    {
+        float occlusionAmount = saturate(1.0 - finalOcclusion);
+        float bentDenominator = lerp(max(totalOcclusionHitWeight, 1.0), max(totalSampleWeight, 1.0), 0.20);
+        float3 rawBentNormalVS = normalize(vnormal + bentNormalAccumVS / max(bentDenominator, 1.0));
+        float3 bentNormalVS = normalize(lerp(vnormal, rawBentNormalVS, saturate(occlusionAmount * 4.0)));
+        bentNormalWS = mul((float3x3)_InvViewMatrix, bentNormalVS);
+    }
+
+    _RW_GTBNTarget[id.xy] = float4(
+        bentNormalWS * 0.5 + 0.5,
+        finalOcclusion);
+}

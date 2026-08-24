@@ -1,0 +1,24 @@
+{
+  "displayName": "Looga Graphics Pro",
+  "name": "com.loogasoft.loogagraphicspro",
+  "description": "A unified Unity 6 URP graphics package for Looga lighting, GTAO, bent normals, and virtual shadows.",
+  "version": "1.0.0",
+  "author": {
+    "name": "LoogaSoft"
+  },
+  "samples": [
+    {
+      "displayName": "Custom Shader Authoring",
+      "description": "Starter HLSL and Shader Graph shaders with the complete Looga Lighting material contract.",
+      "path": "Samples~/Custom Shader Authoring"
+    },
+    {
+      "displayName": "Shadow Validation",
+      "description": "Validation content for Looga virtual shadows.",
+      "path": "Shadows/Samples~/Shadow Validation"
+    }
+  ],
+  "dependencies": {
+    "com.unity.render-pipelines.universal": "17.3.0"
+  }
+}

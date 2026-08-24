@@ -1,0 +1,89 @@
+Shader "Hidden/LoogaSoft/Lighting/MasterDeferred"
+{
+    SubShader
+    {
+        Tags { "RenderType" = "Opaque" "RenderPipeline" = "UniversalPipeline" }
+        Pass
+        {
+            Name "Looga Master Deferred Lighting"
+            ZWrite Off ZTest Always ZClip False Cull Off
+
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma exclude_renderers gles3 glcore
+            #pragma vertex Vert
+            #pragma fragment LoogaDeferredLightingFrag
+            #pragma multi_compile_local_fragment _ _LOOGA_MODEL_SOURCE2 _LOOGA_MODEL_MINNAERT _LOOGA_MODEL_OVERWATCH _LOOGA_MODEL_OREN_NAYAR _LOOGA_MODEL_ARKANE _LOOGA_MODEL_CUSTOM
+
+            #pragma multi_compile_fragment _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
+            #pragma multi_compile_fragment _ _SHADOWS_SOFT _SHADOWS_SOFT_LOW _SHADOWS_SOFT_MEDIUM _SHADOWS_SOFT_HIGH
+            #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
+            #pragma multi_compile_fragment _ _REFLECTION_PROBE_BLENDING
+            #pragma multi_compile_fragment _ _REFLECTION_PROBE_BOX_PROJECTION
+            #pragma multi_compile_fragment _ _REFLECTION_PROBE_ATLAS
+            #pragma multi_compile_fragment _ REFLECTION_PROBE_ROTATION
+            #define _CLUSTER_LIGHT_LOOP 1
+            #pragma multi_compile_fragment _ _ADDITIONAL_LIGHT_SHADOWS
+            #pragma multi_compile_fragment _ LIGHTMAP_SHADOW_MIXING
+            #pragma multi_compile_fragment _ SHADOWS_SHADOWMASK
+            #pragma multi_compile_fragment _ _DEFERRED_MIXED_LIGHTING
+            #pragma multi_compile_fragment _ _SCREEN_SPACE_OCCLUSION
+            #pragma multi_compile_fragment _ _LIGHT_COOKIES
+            #pragma multi_compile_fragment _ _LIGHT_LAYERS
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+            // LOOGA_FIXED_MODEL_BEGIN
+            #if defined(_LOOGA_MODEL_SOURCE2)
+                #define LOOGA_FIXED_LIGHTING_MODEL 1
+            #elif defined(_LOOGA_MODEL_MINNAERT)
+                #define LOOGA_FIXED_LIGHTING_MODEL 3
+            #elif defined(_LOOGA_MODEL_OVERWATCH)
+                #define LOOGA_FIXED_LIGHTING_MODEL 4
+            #elif defined(_LOOGA_MODEL_OREN_NAYAR)
+                #define LOOGA_FIXED_LIGHTING_MODEL 5
+            #elif defined(_LOOGA_MODEL_ARKANE)
+                #define LOOGA_FIXED_LIGHTING_MODEL 6
+            #elif defined(_LOOGA_MODEL_CUSTOM)
+                #define LOOGA_FIXED_LIGHTING_MODEL 100
+            #else
+                #define LOOGA_FIXED_LIGHTING_MODEL 0
+            #endif
+            // LOOGA_FIXED_MODEL_END
+            #pragma require cubearray
+            #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaLightingPass.hlsl"
+
+            ENDHLSL
+        }
+
+        Pass
+        {
+            Name "Looga Clear Deferred Stencil"
+            ZWrite Off ZTest Always ZClip False Cull Off
+            ColorMask 0
+            Stencil
+            {
+                Ref 0
+                Comp Always
+                Pass Replace
+                WriteMask 96
+            }
+
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma exclude_renderers gles3 glcore
+            #pragma vertex Vert
+            #pragma fragment LoogaDeferredStencilClearFrag
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
+
+            half4 LoogaDeferredStencilClearFrag(Varyings input) : SV_Target
+            {
+                return 0.0h;
+            }
+
+            ENDHLSL
+        }
+    }
+}

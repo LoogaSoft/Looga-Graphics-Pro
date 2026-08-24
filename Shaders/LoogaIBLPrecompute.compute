@@ -1,0 +1,238 @@
+#pragma kernel PrefilterGGX
+#pragma kernel PrefilterBeckmann
+#pragma kernel PrefilterPhong
+#pragma kernel IntegrateGGX
+#pragma kernel IntegrateBeckmann
+#pragma kernel IntegratePhong
+#pragma target 5.0
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+
+TextureCube<float4> _SourceCubemap;
+SamplerState sampler_SourceCubemap;
+RWTexture2DArray<float4> _OutputCubeMip;
+RWTexture2D<float4> _OutputBrdfLut;
+
+int _OutputSize;
+int _SampleCount;
+float _Roughness;
+float _PhongExponent;
+
+float RadicalInverseVdC(uint bits)
+{
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+
+float2 Hammersley(uint index, uint count)
+{
+    return float2((float)index / max((float)count, 1.0), RadicalInverseVdC(index));
+}
+
+float LoogaPow5(float value)
+{
+    float value2 = value * value;
+    return value2 * value2 * value;
+}
+
+float3 FaceUvToDirection(uint face, float2 uv)
+{
+    float2 p = uv * 2.0 - 1.0;
+    if (face == 0) return normalize(float3(1.0, -p.y, -p.x));
+    if (face == 1) return normalize(float3(-1.0, -p.y, p.x));
+    if (face == 2) return normalize(float3(p.x, 1.0, p.y));
+    if (face == 3) return normalize(float3(p.x, -1.0, -p.y));
+    if (face == 4) return normalize(float3(p.x, -p.y, 1.0));
+    return normalize(float3(-p.x, -p.y, -1.0));
+}
+
+void BuildBasis(float3 normal, out float3 tangent, out float3 bitangent)
+{
+    float3 up = abs(normal.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
+    tangent = normalize(cross(up, normal));
+    bitangent = cross(normal, tangent);
+}
+
+float3 ToWorld(float3 localDirection, float3 normal)
+{
+    float3 tangent;
+    float3 bitangent;
+    BuildBasis(normal, tangent, bitangent);
+    return normalize(tangent * localDirection.x + bitangent * localDirection.y + normal * localDirection.z);
+}
+
+float3 ImportanceSampleGGX(float2 xi, float roughness, float3 normal)
+{
+    float alpha = max(roughness * roughness, 0.002);
+    float phi = TWO_PI * xi.x;
+    float cosTheta = sqrt((1.0 - xi.y) / max(1.0 + (alpha * alpha - 1.0) * xi.y, 1e-5));
+    float sinTheta = sqrt(saturate(1.0 - cosTheta * cosTheta));
+    return ToWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta), normal);
+}
+
+float3 ImportanceSampleBeckmann(float2 xi, float roughness, float3 normal)
+{
+    float alpha = max(roughness * roughness, 0.01);
+    float phi = TWO_PI * xi.x;
+    float tanTheta2 = -alpha * alpha * log(max(1.0 - xi.y, 1e-5));
+    float cosTheta = rsqrt(1.0 + tanTheta2);
+    float sinTheta = sqrt(saturate(1.0 - cosTheta * cosTheta));
+    return ToWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta), normal);
+}
+
+float3 ImportanceSamplePhong(float2 xi, float exponent, float3 reflectionDirection)
+{
+    float phi = TWO_PI * xi.x;
+    float cosTheta = pow(max(xi.y, 1e-5), rcp(max(exponent + 1.0, 1.0)));
+    float sinTheta = sqrt(saturate(1.0 - cosTheta * cosTheta));
+    return ToWorld(float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta), reflectionDirection);
+}
+
+float3 PrefilterMicrofacet(float3 reflectionDirection, bool beckmann)
+{
+    float3 normal = reflectionDirection;
+    float3 view = normal;
+    float3 sum = 0.0;
+    float weightSum = 0.0;
+    uint count = max((uint)_SampleCount, 1u);
+    [loop] for (uint i = 0u; i < count; i++)
+    {
+        float2 xi = Hammersley(i, count);
+        float3 halfVector = beckmann ? ImportanceSampleBeckmann(xi, _Roughness, normal) : ImportanceSampleGGX(xi, _Roughness, normal);
+        float3 light = normalize(2.0 * dot(view, halfVector) * halfVector - view);
+        float NoL = saturate(dot(normal, light));
+        if (NoL > 0.0)
+        {
+            sum += _SourceCubemap.SampleLevel(sampler_SourceCubemap, light, 0).rgb * NoL;
+            weightSum += NoL;
+        }
+    }
+    return sum / max(weightSum, 1e-4);
+}
+
+float3 PrefilterPhongLobe(float3 reflectionDirection)
+{
+    float3 sum = 0.0;
+    uint count = max((uint)_SampleCount, 1u);
+    [loop] for (uint i = 0u; i < count; i++)
+    {
+        float3 light = ImportanceSamplePhong(Hammersley(i, count), _PhongExponent, reflectionDirection);
+        sum += _SourceCubemap.SampleLevel(sampler_SourceCubemap, light, 0).rgb;
+    }
+    return sum / max((float)count, 1.0);
+}
+
+[numthreads(8, 8, 1)]
+void PrefilterGGX(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_OutputSize || id.y >= (uint)_OutputSize || id.z >= 6u) return;
+    float3 direction = FaceUvToDirection(id.z, (float2(id.xy) + 0.5) / (float)_OutputSize);
+    _OutputCubeMip[id] = float4(PrefilterMicrofacet(direction, false), 1.0);
+}
+
+[numthreads(8, 8, 1)]
+void PrefilterBeckmann(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_OutputSize || id.y >= (uint)_OutputSize || id.z >= 6u) return;
+    float3 direction = FaceUvToDirection(id.z, (float2(id.xy) + 0.5) / (float)_OutputSize);
+    _OutputCubeMip[id] = float4(PrefilterMicrofacet(direction, true), 1.0);
+}
+
+[numthreads(8, 8, 1)]
+void PrefilterPhong(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_OutputSize || id.y >= (uint)_OutputSize || id.z >= 6u) return;
+    float3 direction = FaceUvToDirection(id.z, (float2(id.xy) + 0.5) / (float)_OutputSize);
+    _OutputCubeMip[id] = float4(PrefilterPhongLobe(direction), 1.0);
+}
+
+float SmithGGXVisibility(float NoV, float NoL, float roughness)
+{
+    float alpha = max(roughness * roughness, 0.002);
+    float alpha2 = alpha * alpha;
+    float gv = NoL * sqrt(max(NoV * NoV * (1.0 - alpha2) + alpha2, 1e-5));
+    float gl = NoV * sqrt(max(NoL * NoL * (1.0 - alpha2) + alpha2, 1e-5));
+    return 0.5 / max(gv + gl, 1e-5);
+}
+
+float SmithBeckmannG1(float NoX, float roughness)
+{
+    float alpha = max(roughness * roughness, 0.01);
+    float tanTheta = sqrt(saturate(1.0 - NoX * NoX)) / max(NoX, 1e-4);
+    float a = rcp(max(alpha * tanTheta, 1e-4));
+    if (a >= 1.6) return 1.0;
+    return (3.535 * a + 2.181 * a * a) / max(1.0 + 2.276 * a + 2.577 * a * a, 1e-4);
+}
+
+float2 IntegrateMicrofacet(float NoV, float roughness, bool beckmann)
+{
+    float3 view = float3(sqrt(saturate(1.0 - NoV * NoV)), 0.0, NoV);
+    float2 result = 0.0;
+    uint count = max((uint)_SampleCount, 1u);
+    [loop] for (uint i = 0u; i < count; i++)
+    {
+        float2 xi = Hammersley(i, count);
+        float3 halfVector = beckmann ? ImportanceSampleBeckmann(xi, roughness, float3(0, 0, 1)) : ImportanceSampleGGX(xi, roughness, float3(0, 0, 1));
+        float3 light = normalize(2.0 * dot(view, halfVector) * halfVector - view);
+        float NoL = saturate(light.z);
+        float NoH = saturate(halfVector.z);
+        float VoH = saturate(dot(view, halfVector));
+        if (NoL <= 0.0) continue;
+
+        float visibility = beckmann
+            ? SmithBeckmannG1(NoV, roughness) * SmithBeckmannG1(NoL, roughness) * VoH / max(NoH * NoV, 1e-4)
+            : SmithGGXVisibility(NoV, NoL, roughness) * 4.0 * NoL * VoH / max(NoH, 1e-4);
+        float fresnel = LoogaPow5(1.0 - VoH);
+        result += float2((1.0 - fresnel) * visibility, fresnel * visibility);
+    }
+    return result / max((float)count, 1.0);
+}
+
+float2 IntegratePhongBrdf(float NoV, float roughness)
+{
+    float exponent = max(2.0 / max(pow(roughness, 4.0), 1e-4) - 2.0, 1.0);
+    float3 normal = float3(0, 0, 1);
+    float3 view = float3(sqrt(saturate(1.0 - NoV * NoV)), 0.0, NoV);
+    float3 reflection = reflect(-view, normal);
+    float2 result = 0.0;
+    uint count = max((uint)_SampleCount, 1u);
+    [loop] for (uint i = 0u; i < count; i++)
+    {
+        float3 light = ImportanceSamplePhong(Hammersley(i, count), exponent, reflection);
+        float NoL = saturate(light.z);
+        if (NoL <= 0.0) continue;
+        float3 halfVector = normalize(light + view);
+        float VoH = saturate(dot(view, halfVector));
+        float fresnel = LoogaPow5(1.0 - VoH);
+        result += float2(1.0 - fresnel, fresnel) * NoL;
+    }
+    return result / max((float)count, 1.0);
+}
+
+[numthreads(8, 8, 1)]
+void IntegrateGGX(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_OutputSize || id.y >= (uint)_OutputSize) return;
+    float2 uv = (float2(id.xy) + 0.5) / (float)_OutputSize;
+    _OutputBrdfLut[id.xy] = float4(IntegrateMicrofacet(max(uv.x, 1e-4), uv.y, false), 0.0, 1.0);
+}
+
+[numthreads(8, 8, 1)]
+void IntegrateBeckmann(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_OutputSize || id.y >= (uint)_OutputSize) return;
+    float2 uv = (float2(id.xy) + 0.5) / (float)_OutputSize;
+    _OutputBrdfLut[id.xy] = float4(IntegrateMicrofacet(max(uv.x, 1e-4), uv.y, true), 0.0, 1.0);
+}
+
+[numthreads(8, 8, 1)]
+void IntegratePhong(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_OutputSize || id.y >= (uint)_OutputSize) return;
+    float2 uv = (float2(id.xy) + 0.5) / (float)_OutputSize;
+    _OutputBrdfLut[id.xy] = float4(IntegratePhongBrdf(max(uv.x, 1e-4), uv.y), 0.0, 1.0);
+}
