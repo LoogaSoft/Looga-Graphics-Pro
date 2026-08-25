@@ -1,6 +1,7 @@
 using System;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 
 namespace LoogaSoft.Lighting.Editor
 {
@@ -159,6 +160,64 @@ namespace LoogaSoft.Lighting.Editor
             SerializedProperty property = serializedObject.FindProperty(propertyName);
             if (property != null)
                 EditorGUILayout.PropertyField(property, new GUIContent(label));
+        }
+
+        protected bool TryGetRendererMode(out int renderingMode)
+        {
+            renderingMode = -1;
+
+            string path = AssetDatabase.GetAssetPath(target);
+            if (string.IsNullOrEmpty(path))
+                return false;
+
+            UnityEngine.Object[] assets = AssetDatabase.LoadAllAssetsAtPath(path);
+            foreach (UnityEngine.Object asset in assets)
+            {
+                if (asset is not UniversalRendererData rendererData ||
+                    !RendererContainsFeature(rendererData))
+                {
+                    continue;
+                }
+
+                SerializedObject rendererObject = new SerializedObject(rendererData);
+                SerializedProperty modeProperty = rendererObject.FindProperty("m_RenderingMode");
+                if (modeProperty == null)
+                    return false;
+
+                renderingMode = modeProperty.intValue;
+                return true;
+            }
+
+            return false;
+        }
+
+        protected static string GetRenderingModeName(int renderingMode)
+        {
+            return renderingMode switch
+            {
+                0 => "Forward",
+                1 => "Deferred",
+                2 => "Forward+",
+                3 => "Deferred+",
+                _ => "Unknown"
+            };
+        }
+
+        private bool RendererContainsFeature(UniversalRendererData rendererData)
+        {
+            SerializedObject rendererObject = new SerializedObject(rendererData);
+            SerializedProperty features = rendererObject.FindProperty("m_RendererFeatures");
+            if (features == null || !features.isArray)
+                return false;
+
+            for (int i = 0; i < features.arraySize; i++)
+            {
+                SerializedProperty feature = features.GetArrayElementAtIndex(i);
+                if (feature.objectReferenceValue == target)
+                    return true;
+            }
+
+            return false;
         }
     }
 }

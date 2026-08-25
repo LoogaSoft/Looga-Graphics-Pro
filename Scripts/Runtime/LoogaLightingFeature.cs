@@ -2,6 +2,7 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
+using UnityEngine.Scripting.APIUpdating;
 using System.Reflection;
 using LoogaSoft.Tonemapper.Runtime;
 #if UNITY_EDITOR
@@ -11,6 +12,7 @@ using UnityEditor;
 namespace LoogaSoft.Lighting
 {
     [DisallowMultipleRendererFeature("Looga Lighting")]
+    [MovedFrom(true, "LoogaSoft.Lighting", "LoogaSoft.LightingPrime", "LoogaLightingFeature")]
     public class LoogaLightingFeature : ScriptableRendererFeature
     {
         private const string FeatureDisplayName = "Looga Lighting";
