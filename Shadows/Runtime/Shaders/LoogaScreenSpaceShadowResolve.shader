@@ -831,13 +831,13 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
                 positionWS,
                 positionDerivativeX,
                 positionDerivativeY);
-            // Build the receiver plane from the smooth shading normal. The
-            // original derivatives span the geometric triangle plane and reveal
-            // tessellation when PCSS applies them across a wide filter kernel.
+            // Material normal maps must not tilt the shadow receiver plane.
+            // Project onto the geometric normal reconstructed from depth so
+            // surface detail cannot punch light leaks through a solid shadow.
             positionDerivativeX -=
-                normalWS * dot(normalWS, positionDerivativeX);
+                biasNormalWS * dot(biasNormalWS, positionDerivativeX);
             positionDerivativeY -=
-                normalWS * dot(normalWS, positionDerivativeY);
+                biasNormalWS * dot(biasNormalWS, positionDerivativeY);
             if (LoogaIsSky(deviceDepth))
             {
                 LoogaShadowEvaluation lit = (LoogaShadowEvaluation)0;
@@ -879,11 +879,10 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
                 positionWS,
                 positionDerivativeX,
                 positionDerivativeY);
-            float3 normalWS = LoogaResolveSurfaceNormal(uv, positionWS);
             positionDerivativeX -=
-                normalWS * dot(normalWS, positionDerivativeX);
+                biasNormalWS * dot(biasNormalWS, positionDerivativeX);
             positionDerivativeY -=
-                normalWS * dot(normalWS, positionDerivativeY);
+                biasNormalWS * dot(biasNormalWS, positionDerivativeY);
             float penumbraWorld = SAMPLE_TEXTURE2D_X(
                 _BlitTexture,
                 sampler_PointClamp,

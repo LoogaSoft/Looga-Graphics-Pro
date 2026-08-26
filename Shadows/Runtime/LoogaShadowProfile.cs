@@ -46,7 +46,7 @@ namespace LoogaSoft.Shadows
         // Retained for one-way migration of profiles authored before settings were grouped.
         [SerializeField, HideInInspector] private LoogaShadowQuality _quality = LoogaShadowQuality.High;
         [SerializeField, HideInInspector] private bool _renderSceneView = true;
-        [SerializeField, HideInInspector] private float _nearClipmapRadius = 1f;
+        [SerializeField, HideInInspector] private float _nearClipmapRadius = 8f;
         [SerializeField, HideInInspector] private float _shadowDistance = 300f;
         [SerializeField, HideInInspector] private float _depthRange = 500f;
         [SerializeField, HideInInspector] private float _sourceAngularDiameter = 0.53f;

@@ -81,14 +81,14 @@ namespace LoogaSoft.Shadows
         public static LoogaShadowSettings Default => Create(
             LoogaShadowQuality.High,
             true,
-            1f,
+            8f,
             300f,
             500f,
             0.53f,
             1f,
             3f,
             0.0012f,
-            0.002f,
+            0.0005f,
             0.12f,
             LoogaShadowNormalsSource.GBuffer,
             LoogaShadowDebugView.Off);

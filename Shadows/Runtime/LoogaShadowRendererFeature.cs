@@ -466,7 +466,6 @@ namespace LoogaSoft.Shadows
             private Vector4[] _clipmapCenters;
             private Vector4[] _clipmapRadii;
             private Vector4[] _clipmapRects;
-            private readonly Plane[] _shadowCullPlanes = new Plane[6];
 
             public ClipmapAtlasPass()
             {
@@ -585,11 +584,7 @@ namespace LoogaSoft.Shadows
 
                 UniversalRenderingData renderingData = frameData.Get<UniversalRenderingData>();
                 UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
-                CullContextData cullContextData = frameData.Get<CullContextData>();
-                CullingResults shadowCullResults = CullShadowCasters(
-                    cameraData,
-                    cullContextData,
-                    renderingData.cullResults);
+                CullingResults shadowCullResults = renderingData.cullResults;
                 LoogaShadowFrameData shadowFrameData = frameData.GetOrCreate<LoogaShadowFrameData>();
                 shadowFrameData.HasShadowCasters =
                     shadowCullResults.GetShadowCasterBounds(
@@ -715,7 +710,6 @@ namespace LoogaSoft.Shadows
                         context.cmd.SetGlobalVector(
                             ShadowBias,
                             GetCasterShadowBias(
-                                data.MainLight,
                                 data.ClipmapRadii[level].y,
                                 data.Settings));
                         context.cmd.SetViewProjectionMatrices(
@@ -831,7 +825,6 @@ namespace LoogaSoft.Shadows
                         context.cmd.SetGlobalVector(
                             ShadowBias,
                             GetCasterShadowBias(
-                                data.MainLight,
                                 data.ClipmapRadii[level].y,
                                 data.Settings));
                         context.cmd.SetViewProjectionMatrices(
@@ -881,35 +874,17 @@ namespace LoogaSoft.Shadows
             }
 
             private static Vector4 GetCasterShadowBias(
-                VisibleLight visibleLight,
                 float worldTexelSize,
                 LoogaShadowResolvedSettings settings)
             {
-                Light light = visibleLight.light;
-                if (light == null)
-                    return new Vector4(0f, 0f, (float)LightType.Directional, 0f);
-
-                float kernelRadius = 1f;
-                if (light.shadows == LightShadows.Soft)
-                {
-                    SoftShadowQuality quality = SoftShadowQuality.Medium;
-                    if (light.TryGetComponent(out UniversalAdditionalLightData additionalLightData))
-                        quality = additionalLightData.softShadowQuality;
-
-                    kernelRadius = quality switch
-                    {
-                        SoftShadowQuality.Low => 1.5f,
-                        SoftShadowQuality.High => 3.5f,
-                        _ => 2.5f
-                    };
-                }
-
+                // Filter softness must not inflate per-vertex displacement;
+                // doing so opens visible gaps along mesh-normal seams.
                 float depthBias = Mathf.Max(
-                    light.shadowBias * worldTexelSize * kernelRadius,
-                    settings.DepthBias * kernelRadius);
+                    settings.DepthBias,
+                    worldTexelSize * 0.02f);
                 float normalBias = Mathf.Max(
-                    light.shadowNormalBias * worldTexelSize * kernelRadius,
-                    settings.NormalBias * kernelRadius);
+                    settings.NormalBias,
+                    worldTexelSize * 0.005f);
                 return new Vector4(
                     -depthBias,
                     -normalBias,
@@ -933,26 +908,6 @@ namespace LoogaSoft.Shadows
                     ref shadowDrawingSettings);
             }
 
-            private CullingResults CullShadowCasters(
-                UniversalCameraData cameraData,
-                CullContextData cullContextData,
-                CullingResults fallbackResults)
-            {
-                if (!cameraData.camera.TryGetCullingParameters(false, out ScriptableCullingParameters cullingParameters))
-                    return fallbackResults;
-
-                int largestLevel = Mathf.Max(0, _settings.ClipmapCount - 1);
-                Matrix4x4 cullingMatrix =
-                    _projectionMatrices[largestLevel] * _viewMatrices[largestLevel];
-                cullingParameters.cullingMatrix = cullingMatrix;
-                GeometryUtility.CalculateFrustumPlanes(cullingMatrix, _shadowCullPlanes);
-                cullingParameters.cullingPlaneCount = _shadowCullPlanes.Length;
-                for (int planeIndex = 0; planeIndex < _shadowCullPlanes.Length; planeIndex++)
-                    cullingParameters.SetCullingPlane(planeIndex, _shadowCullPlanes[planeIndex]);
-                cullingParameters.cullingOptions &= ~CullingOptions.OcclusionCull;
-                cullingParameters.shadowDistance = _settings.DepthRange;
-                return cullContextData.Cull(ref cullingParameters);
-            }
         }
 
         private sealed class ResolvePass : ScriptableRenderPass
