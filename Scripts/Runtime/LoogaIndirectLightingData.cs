@@ -3,7 +3,7 @@ using UnityEngine;
 
 namespace LoogaSoft.Lighting
 {
-    [CreateAssetMenu(fileName = "Looga Indirect Lighting Data", menuName = "LoogaSoft/Lighting/Indirect Lighting Data")]
+    [CreateAssetMenu(fileName = "Looga Indirect Lighting Data", menuName = "LoogaSoft/Graphics Pro/Lighting/Indirect Lighting Data")]
     public sealed class LoogaIndirectLightingData : ScriptableObject
     {
         [Serializable]

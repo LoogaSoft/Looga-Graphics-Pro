@@ -34,7 +34,7 @@ namespace LoogaSoft.Shadows
         WorldNormals = 7
     }
 
-    [CreateAssetMenu(fileName = "Looga Shadow Profile", menuName = "LoogaSoft/Shadows/Shadow Profile")]
+    [CreateAssetMenu(fileName = "Looga Shadow Profile", menuName = "LoogaSoft/Graphics Pro/Shadows/Shadow Profile")]
     public sealed class LoogaShadowProfile : ScriptableObject
     {
         [SerializeField]

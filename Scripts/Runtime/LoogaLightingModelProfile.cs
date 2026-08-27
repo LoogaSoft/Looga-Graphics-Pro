@@ -105,7 +105,7 @@ namespace LoogaSoft.Lighting
 
     [CreateAssetMenu(
         fileName = "Looga Lighting Model",
-        menuName = "LoogaSoft/Lighting/Lighting Model Profile")]
+        menuName = "LoogaSoft/Graphics Pro/Lighting/Model Profile")]
     public sealed class LoogaLightingModelProfile : ScriptableObject
     {
         [TextArea(2, 5)]
