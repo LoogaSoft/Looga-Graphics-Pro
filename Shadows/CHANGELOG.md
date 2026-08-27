@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Kept the screen-space shadow variant when a renderer contains inactive Looga Shadows so runtime reactivation works.
 - Added selectable G-buffer, reconstructed-depth, and depth-normals-pass sources for receiver surface normals.
 - Decoupled PCSS receiver-plane depth gradients from material shading normals by deriving the local depth plane from projected shadow-coordinate derivatives.
 - Removed camera-relative clipmap outlines by evaluating receiver derivatives before dynamic level selection and separating the blocker handoff from penumbra-driven filter-level selection.

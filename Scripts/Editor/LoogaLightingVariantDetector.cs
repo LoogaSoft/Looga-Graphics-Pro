@@ -157,10 +157,14 @@ namespace LoogaSoft.Lighting.Editor
             {
                 SerializedObject renderer = new SerializedObject(renderers[i]);
                 octahedralNormals.Add(ReadBool(renderer, "m_AccurateGbufferNormals"));
+                // Keep this variant because Looga Shadows can become active at runtime.
                 hasScreenSpaceShadows |=
-                    HasActiveRendererFeature(renderer, ScreenSpaceShadowsTypeName) ||
-                    HasActiveRendererFeature(renderer, LoogaShadowsFeatureTypeName);
-                hasScreenSpaceOcclusion |= HasActiveRendererFeature(renderer, ScreenSpaceOcclusionTypeName);
+                    HasRendererFeature(renderer, ScreenSpaceShadowsTypeName, true) ||
+                    HasRendererFeature(renderer, LoogaShadowsFeatureTypeName, false);
+                hasScreenSpaceOcclusion |= HasRendererFeature(
+                    renderer,
+                    ScreenSpaceOcclusionTypeName,
+                    true);
             }
 
             if (hasScreenSpaceShadows)
@@ -239,7 +243,10 @@ namespace LoogaSoft.Lighting.Editor
             return false;
         }
 
-        private static bool HasActiveRendererFeature(SerializedObject renderer, string typeName)
+        private static bool HasRendererFeature(
+            SerializedObject renderer,
+            string typeName,
+            bool activeOnly)
         {
             SerializedProperty features = renderer.FindProperty("m_RendererFeatures");
             if (features == null || !features.isArray)
@@ -251,7 +258,7 @@ namespace LoogaSoft.Lighting.Editor
                     .objectReferenceValue as ScriptableRendererFeature;
 
                 if (feature != null &&
-                    feature.isActive &&
+                    (!activeOnly || feature.isActive) &&
                     (feature.GetType().Name == typeName || feature.GetType().FullName == typeName))
                     return true;
             }
