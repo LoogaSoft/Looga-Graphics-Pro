@@ -46,6 +46,11 @@ namespace LoogaSoft.Tonemapper.Editor
             DrawUnityTonemapperWarning();
 
             PropertyField(m_TonemapMode);
+
+            EditorGUILayout.HelpBox(
+                "Override the mode and choose a curve to enable tonemapping. None leaves the image unchanged. " +
+                "The component header checkbox disables this override; no renderer tonemapper toggle is required.",
+                MessageType.Info);
             
             EditorGUILayout.Space();
             PropertyField(m_PreExposure);
@@ -57,7 +62,7 @@ namespace LoogaSoft.Tonemapper.Editor
             PropertyField(m_Contrast);
             PropertyField(m_Saturation);
 
-            var currentMode = (LoogaTonemapMode)m_TonemapMode.value.enumValueIndex;
+            var currentMode = (LoogaTonemapMode)m_TonemapMode.value.intValue;
 
             if (currentMode == LoogaTonemapMode.Sigmoid || currentMode == LoogaTonemapMode.ReinhardExtended)
             {
@@ -69,7 +74,8 @@ namespace LoogaSoft.Tonemapper.Editor
 
         private void DrawUnityTonemapperWarning()
         {
-            if (!HasActiveUnityTonemapper())
+            var tonemapper = (LoogaTonemapper)target;
+            if (!tonemapper.IsActive() || !tonemapper.tonemapMode.overrideState || !HasActiveUnityTonemapper())
                 return;
 
             EditorGUILayout.HelpBox(

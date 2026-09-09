@@ -39,6 +39,7 @@ namespace LoogaSoft.Tonemapper.Runtime
 
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
         {
+            if (!frameData.Get<UniversalCameraData>().postProcessEnabled) return;
             var volume = VolumeManager.instance.stack.GetComponent<LoogaTonemapper>();
             if (volume == null || !volume.IsActive()) return;
             if (material == null) return;

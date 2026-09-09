@@ -49,15 +49,6 @@ namespace LoogaSoft.Lighting.Editor
                 }
             });
 
-            DrawToggleSection(
-                "Tonemapper",
-                "LoogaLightingFeature.Tonemapper",
-                false,
-                serializedObject.FindProperty("enableTonemapper"),
-                () => EditorGUILayout.HelpBox(
-                    "Applies the Looga tonemapping pass after post-processing.",
-                    MessageType.Info));
-
             serializedObject.ApplyModifiedProperties();
         }
 

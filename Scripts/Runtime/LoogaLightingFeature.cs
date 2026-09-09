@@ -42,9 +42,6 @@ namespace LoogaSoft.Lighting
         public LightingModel activeLightingModel = LightingModel.DisneyBurley;
         public LoogaLightingModelProfile customLightingModelProfile;
 
-        [InspectorName("Enable Tonemapper")]
-        public bool enableTonemapper = true;
-
         [InspectorName("Enable Advanced Material Data")]
         public bool enableAdvancedMaterialData = true;
         [InspectorName("Enable Subsurface Scattering")]
@@ -204,8 +201,6 @@ namespace LoogaSoft.Lighting
                 else _customLightingPass.UpdateMaterials(this);
             }
 
-            if (enableTonemapper)
-                UpdateTonemapperState();
         }
 
         private void UpdateLightingModelKeyword(int lightingModel)
@@ -348,7 +343,8 @@ namespace LoogaSoft.Lighting
 
             if (!IsDeferredPlusRenderer(renderer))
             {
-                EnqueueTonemapper(renderer);
+                if (renderingData.cameraData.postProcessEnabled)
+                    EnqueueTonemapper(renderer);
                 return;
             }
 
@@ -358,12 +354,14 @@ namespace LoogaSoft.Lighting
                 renderer.EnqueuePass(_customLightingPass);
             }
 
-            EnqueueTonemapper(renderer);
+            if (renderingData.cameraData.postProcessEnabled)
+                EnqueueTonemapper(renderer);
         }
 
         private void EnqueueTonemapper(ScriptableRenderer renderer)
         {
-            if (!enableTonemapper)
+            var tonemapper = VolumeManager.instance.stack?.GetComponent<LoogaTonemapper>();
+            if (tonemapper == null || !tonemapper.IsActive())
                 return;
 
             UpdateTonemapperState();

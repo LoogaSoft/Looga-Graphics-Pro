@@ -13,21 +13,23 @@ namespace LoogaSoft.Tonemapper.Runtime
 
     public enum LoogaTonemapMode
     {
-        AgX,
+        // Preserve existing serialized curve IDs when adding the inactive mode.
+        None = -1,
+        AgX = 0,
         [InspectorName("Khronos PBR Neutral")]
-        KhronosPBRNeutral,
+        KhronosPBRNeutral = 1,
         [InspectorName("Sigmoid (Log-Logistic)")]
-        Sigmoid,
+        Sigmoid = 2,
         [InspectorName("Reinhard Extended")]
-        ReinhardExtended
+        ReinhardExtended = 3
     }
 
     [Serializable, VolumeComponentMenu("LoogaSoft/Looga Tonemapper")]
     [SupportedOnRenderPipeline(typeof(UniversalRenderPipelineAsset))]
     public sealed class LoogaTonemapper : VolumeComponent, IPostProcessComponent
     {
-        [Tooltip("The curve applied to the final HDR buffer. All modes share the same 18% middle-gray calibration so they can be compared without readjusting exposure.")]
-        public LoogaTonemapModeParameter tonemapMode = new LoogaTonemapModeParameter(LoogaTonemapMode.KhronosPBRNeutral);
+        [Tooltip("None leaves the image unchanged. Override this parameter and select a curve to enable tonemapping. All curves share the same 18% middle-gray calibration.")]
+        public LoogaTonemapModeParameter tonemapMode = new LoogaTonemapModeParameter(LoogaTonemapMode.None);
 
         [Header("Exposure")]
         [Tooltip("Exposure in stops applied before tonemapping.")]
@@ -58,7 +60,9 @@ namespace LoogaSoft.Tonemapper.Runtime
         [Tooltip("The scene-linear white point used by Reinhard Extended. Middle gray remains exposure-matched as this changes.")]
         public MinFloatParameter reinhardLimit = new MinFloatParameter(1.5f, 0.1f);
 
-        public bool IsActive() => active;
+        // Evaluate the blended value, not overrideState: the Volume stack resolves
+        // unchecked parameters and volumes with zero influence back to defaults.
+        public bool IsActive() => active && tonemapMode.value != LoogaTonemapMode.None;
         public bool IsTileCompatible() => false;
     }
 }

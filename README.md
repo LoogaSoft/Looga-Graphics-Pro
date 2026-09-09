@@ -12,6 +12,8 @@ Looga Graphics Pro unifies Looga Lighting, GTAO, bent normals, and virtual shado
 
 Each system remains independently configurable. Looga GTAO can generate ambient occlusion only, or ambient occlusion plus bent normals. Bent normals are enabled by default to preserve the package's original GTBN behavior.
 
+Tonemapping is controlled exclusively by the **Looga Tonemapper** Volume override. A new override defaults to **None** with all parameter overrides unchecked, so adding it leaves the image unchanged. Override its mode and choose a curve to opt in. See [Volume-controlled tonemapping](Documentation~/tonemapper.md) for usage and upgrade behavior.
+
 ## Shader Variants
 
 Open **Project Settings > LoogaSoft > Lighting > Shader Variants** and select **Detect From Project**. Looga Lighting records the states supported by active URP assets, generates only the model-specialized Master Deferred shaders referenced by those renderer assets, and skips unchanged shader imports across domain reloads. It validates the profile before builds and reports the retained count afterward. Commit `ProjectSettings/LoogaLightingVariants.asset` and the generated shaders under `Assets/Resources/Shaders/Generated/LoogaSoft`.

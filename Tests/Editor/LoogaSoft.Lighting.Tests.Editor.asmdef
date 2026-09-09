@@ -1,0 +1,12 @@
+{
+    "name": "LoogaSoft.Lighting.Tests.Editor",
+    "references": [
+        "LoogaSoft.Lighting.Runtime",
+        "Unity.RenderPipelines.Core.Runtime",
+        "Unity.RenderPipelines.Universal.Runtime"
+    ],
+    "includePlatforms": ["Editor"],
+    "optionalUnityReferences": ["TestAssemblies"],
+    "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+    "autoReferenced": false
+}
