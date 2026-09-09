@@ -4,6 +4,8 @@
 #define LOOGA_DEFERRED_GBUFFER_INPUT 1
 #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaMasterLighting.hlsl"
 
+TEXTURE2D_X_FLOAT(_LoogaLightingDepthTexture);
+
 TEXTURE2D_X_HALF(_SSSSProfileTexture);
 TEXTURE2D_X_HALF(_SSSSProfileExtraTexture);
 TEXTURE2D_X_HALF(_LoogaMaterialExtrasTexture);
@@ -52,7 +54,7 @@ GBufferData UnpackLoogaGBuffers(uint2 pixelCoord)
     gBufferData.occlusion = gBuffer1.a;
     gBufferData.normalWS = SafeNormalize(DecodeLoogaGBufferNormal(gBuffer2.rgb));
     gBufferData.smoothness = gBuffer2.a;
-    gBufferData.depth = gBufferDepth;
+    gBufferData.depth = LOAD_TEXTURE2D_X(_LoogaLightingDepthTexture, pixelCoord).r;
     gBufferData.shadowMask = shadowMask;
     gBufferData.meshRenderingLayers = renderingLayers;
     return gBufferData;
@@ -63,7 +65,7 @@ half4 LoogaDeferredLightingFrag(Varyings input) : SV_Target
     UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
     float2 uv = input.texcoord;
 
-    float rawDepth = LOAD_TEXTURE2D_X(_CameraDepthTexture, input.positionCS.xy).x;
+    float rawDepth = LOAD_TEXTURE2D_X(_LoogaLightingDepthTexture, input.positionCS.xy).x;
     #if UNITY_REVERSED_Z
         float depth = rawDepth;
     #else

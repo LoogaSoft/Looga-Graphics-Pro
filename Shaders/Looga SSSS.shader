@@ -12,7 +12,9 @@ Shader "Hidden/LoogaSoft/SSSS"
         HLSLINCLUDE
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
         #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
-        #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+        #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/DynamicScalingClamping.hlsl"
+        TEXTURE2D_X_FLOAT(_LoogaLightingDepthTexture);
+        float4 _LoogaLightingDepthTexture_TexelSize;
 
         TEXTURE2D_X_HALF(_SSSSProfileTexture);
         TEXTURE2D_X_HALF(_SSSSProfileExtraTexture);
@@ -25,12 +27,13 @@ Shader "Hidden/LoogaSoft/SSSS"
 
         float SampleSceneDepthLod(float2 uv)
         {
-            uv = ClampAndScaleUVForBilinear(UnityStereoTransformScreenSpaceTex(uv), _CameraDepthTexture_TexelSize.xy);
-            return SAMPLE_TEXTURE2D_X_LOD(_CameraDepthTexture, sampler_PointClamp, uv, 0).r;
+            uv = ClampAndScaleUVForBilinear(UnityStereoTransformScreenSpaceTex(uv), _LoogaLightingDepthTexture_TexelSize.xy);
+            return SAMPLE_TEXTURE2D_X_LOD(_LoogaLightingDepthTexture, sampler_PointClamp, uv, 0).r;
         }
 
         half4 PerformBlur(Varyings input, float2 direction)
         {
+            UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
             float2 uv = input.texcoord;
 
             // 1. Read Profile Target FIRST

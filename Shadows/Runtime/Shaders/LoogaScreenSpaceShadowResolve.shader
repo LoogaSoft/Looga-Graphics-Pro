@@ -7,7 +7,15 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
         HLSLINCLUDE
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
         #include "Packages/com.unity.render-pipelines.core/Runtime/Utilities/Blit.hlsl"
-        #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+        #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/DynamicScalingClamping.hlsl"
+        TEXTURE2D_X_FLOAT(_LoogaShadowDepthTexture);
+        float4 _LoogaShadowDepthTexture_TexelSize;
+
+        float SampleLoogaShadowDepth(float2 uv)
+        {
+            uv = ClampAndScaleUVForBilinear(UnityStereoTransformScreenSpaceTex(uv), _LoogaShadowDepthTexture_TexelSize.xy);
+            return SAMPLE_TEXTURE2D_X(_LoogaShadowDepthTexture, sampler_PointClamp, uv).r;
+        }
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareNormalsTexture.hlsl"
 
         TEXTURE2D_SHADOW(_LoogaVirtualShadowAtlas);
@@ -822,7 +830,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
 
         LoogaShadowEvaluation LoogaEvaluateScreen(float2 uv, out float3 positionWS, out float3 normalWS, out float deviceDepth)
         {
-            deviceDepth = SampleSceneDepth(uv);
+            deviceDepth = SampleLoogaShadowDepth(uv);
             positionWS = LoogaReconstructWorldPosition(uv, deviceDepth);
             float3 positionDerivativeX = ddx(positionWS);
             float3 positionDerivativeY = ddy(positionWS);
@@ -868,7 +876,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
         half4 FragRefilter(Varyings input) : SV_Target
         {
             float2 uv = input.texcoord;
-            float deviceDepth = SampleSceneDepth(uv);
+            float deviceDepth = SampleLoogaShadowDepth(uv);
             float3 positionWS = LoogaReconstructWorldPosition(uv, deviceDepth);
             float3 positionDerivativeX = ddx(positionWS);
             float3 positionDerivativeY = ddy(positionWS);
@@ -906,7 +914,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
         half4 FragDenoise(Varyings input) : SV_Target
         {
             float2 centerUv = input.texcoord;
-            float centerDeviceDepth = SampleSceneDepth(centerUv);
+            float centerDeviceDepth = SampleLoogaShadowDepth(centerUv);
             float2 centerShadow = SAMPLE_TEXTURE2D_X(_BlitTexture, sampler_PointClamp, centerUv).rg;
             if (LoogaIsSky(centerDeviceDepth))
                 return half4(centerShadow, 0.0, 1.0);
@@ -919,10 +927,10 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
             // derivatives span both surfaces at silhouettes and would otherwise
             // relax the bilateral depth rejection exactly where it must be strict.
             float3 footprintPositionX = LoogaReconstructWorldPosition(
-                saturate(centerUv + float2(_CameraDepthTexture_TexelSize.x, 0.0)),
+                saturate(centerUv + float2(_LoogaShadowDepthTexture_TexelSize.x, 0.0)),
                 centerDeviceDepth);
             float3 footprintPositionY = LoogaReconstructWorldPosition(
-                saturate(centerUv + float2(0.0, _CameraDepthTexture_TexelSize.y)),
+                saturate(centerUv + float2(0.0, _LoogaShadowDepthTexture_TexelSize.y)),
                 centerDeviceDepth);
             float receiverFootprint = max(
                 length(footprintPositionX - centerPosition),
@@ -943,7 +951,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
                 float sampleOffset = sampleIndex;
                 float2 sampleUv = saturate(
                     centerUv + direction * sampleOffset);
-                float sampleDeviceDepth = SampleSceneDepth(sampleUv);
+                float sampleDeviceDepth = SampleLoogaShadowDepth(sampleUv);
                 if (LoogaIsSky(sampleDeviceDepth))
                     continue;
 
@@ -1036,7 +1044,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
             float3 positionWS;
             float3 normalWS;
             float deviceDepth;
-            deviceDepth = SampleSceneDepth(input.texcoord);
+            deviceDepth = SampleLoogaShadowDepth(input.texcoord);
             if (LoogaIsSky(deviceDepth))
                 return half4(0.0, 0.0, 0.0, 1.0);
 
@@ -1066,7 +1074,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
 
         half4 FragDebugTexels(Varyings input) : SV_Target
         {
-            float deviceDepth = SampleSceneDepth(input.texcoord);
+            float deviceDepth = SampleLoogaShadowDepth(input.texcoord);
             if (LoogaIsSky(deviceDepth))
                 return half4(0.0, 0.0, 0.0, 1.0);
 
@@ -1106,7 +1114,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
 
         half4 FragDebugDepth(Varyings input) : SV_Target
         {
-            float deviceDepth = SampleSceneDepth(input.texcoord);
+            float deviceDepth = SampleLoogaShadowDepth(input.texcoord);
             if (LoogaIsSky(deviceDepth))
                 return half4(0.0, 0.0, 0.0, 1.0);
 
@@ -1119,7 +1127,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
 
         half4 FragDebugNormals(Varyings input) : SV_Target
         {
-            float deviceDepth = SampleSceneDepth(input.texcoord);
+            float deviceDepth = SampleLoogaShadowDepth(input.texcoord);
             if (LoogaIsSky(deviceDepth))
                 return half4(0.0, 0.0, 0.0, 1.0);
 

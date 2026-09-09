@@ -330,7 +330,13 @@ namespace LoogaSoft.Lighting
                         data.generateBentNormals ? 1 : 0);
 
                     if (data.depthTexture.IsValid())
-                        commandBuffer.SetGlobalTexture("_CameraDepthTexture", data.depthTexture);
+                    {
+                        // Bind each kernel explicitly. Do not overwrite URP's
+                        // global scene depth for subsequent renderer passes.
+                        commandBuffer.SetComputeTextureParam(_gtaoCompute, _gtaoKernel, "_LoogaGtaoDepthTexture", data.depthTexture);
+                        commandBuffer.SetComputeTextureParam(_blurCompute, _blurHorizontalKernel, "_LoogaGtaoDepthTexture", data.depthTexture);
+                        commandBuffer.SetComputeTextureParam(_blurCompute, _blurVerticalKernel, "_LoogaGtaoDepthTexture", data.depthTexture);
+                    }
                     if (data.normalsTexture.IsValid())
                         commandBuffer.SetGlobalTexture("_GBuffer2", data.normalsTexture);
 

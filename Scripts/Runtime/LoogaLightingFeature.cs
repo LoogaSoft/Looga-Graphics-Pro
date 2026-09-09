@@ -432,7 +432,18 @@ namespace LoogaSoft.Lighting
                 Shader.PropertyToID("_GBuffer2")
             };
 
-            private static readonly int CameraDepthTextureID = Shader.PropertyToID("_CameraDepthTexture");
+            // Internal depth must never replace URP's scene-depth copy. Later
+            // transparent passes may be writing the active depth attachment.
+            private static readonly int LightingDepthTextureID = Shader.PropertyToID("_LoogaLightingDepthTexture");
+            private static readonly int LightingDepthTexelSizeID = Shader.PropertyToID("_LoogaLightingDepthTexture_TexelSize");
+
+            private static void BindLightingDepth(RasterCommandBuffer cmd, TextureHandle texture)
+            {
+                RTHandle depth = texture;
+                cmd.SetGlobalTexture(LightingDepthTextureID, texture);
+                cmd.SetGlobalVector(LightingDepthTexelSizeID, new Vector4(
+                    1f / depth.rt.width, 1f / depth.rt.height, depth.rt.width, depth.rt.height));
+            }
             private static readonly int MainLightPositionID = Shader.PropertyToID("_MainLightPosition");
             private static readonly int MainLightColorID = Shader.PropertyToID("_MainLightColor");
             private static readonly int SSSSProfileTextureID = Shader.PropertyToID("_SSSSProfileTexture");
@@ -469,7 +480,7 @@ namespace LoogaSoft.Lighting
                 public bool useAccurateGBufferNormals;
             }
 
-            private class SSSSPassData { public TextureHandle source; public Material material; public int passIndex; }
+            private class SSSSPassData { public TextureHandle source, depth; public Material material; public int passIndex; }
             private class DrawProfileData { public RendererListHandle rendererList; }
             private class BlitPassData
             {
@@ -628,7 +639,7 @@ namespace LoogaSoft.Lighting
                                 if (data.gBuffers[i].IsValid()) cmd.SetGlobalTexture(ShaderGBufferIDs[i], data.gBuffers[i]);
                         }
 
-                        if (data.depthTexture.IsValid()) cmd.SetGlobalTexture(CameraDepthTextureID, data.depthTexture);
+                        if (data.depthTexture.IsValid()) BindLightingDepth(cmd, data.depthTexture);
                         if (data.sourceColorTexture.IsValid()) cmd.SetGlobalTexture(LoogaSourceColorTextureID, data.sourceColorTexture);
                         if (data.ssssProfileTexture.IsValid()) cmd.SetGlobalTexture(SSSSProfileTextureID, data.ssssProfileTexture);
                         if (data.ssssProfileExtraTexture.IsValid()) cmd.SetGlobalTexture(SSSSProfileExtraTextureID, data.ssssProfileExtraTexture);
@@ -654,18 +665,20 @@ namespace LoogaSoft.Lighting
                     using (var builder = renderGraph.AddRasterRenderPass<SSSSPassData>("Looga SSSS Horizontal", out var passData))
                     {
                         passData.source = tempLightingTarget;
+                        passData.depth = hardwareDepth;
                         passData.material = _feature._ssssMaterial;
                         passData.passIndex = 0;
 
                         builder.UseTexture(passData.source, AccessFlags.Read);
                         builder.SetRenderAttachment(ssssPingPong, 0, AccessFlags.Write);
-                        builder.SetRenderAttachmentDepth(hardwareDepth, AccessFlags.Read);
+                        builder.UseTexture(passData.depth, AccessFlags.Read);
                         builder.UseTexture(ssssProfileTarget, AccessFlags.Read);
                         builder.UseTexture(ssssProfileExtraTarget, AccessFlags.Read);
                         builder.AllowGlobalStateModification(true);
 
                         builder.SetRenderFunc((SSSSPassData data, RasterGraphContext context) =>
                         {
+                            BindLightingDepth(context.cmd, data.depth);
                             context.cmd.SetGlobalTexture(SSSSProfileTextureID, ssssProfileTarget);
                             context.cmd.SetGlobalTexture(SSSSProfileExtraTextureID, ssssProfileExtraTarget);
                             Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0), data.material, data.passIndex);
@@ -675,18 +688,20 @@ namespace LoogaSoft.Lighting
                     using (var builder = renderGraph.AddRasterRenderPass<SSSSPassData>("Looga SSSS Vertical", out var passData))
                     {
                         passData.source = ssssPingPong;
+                        passData.depth = hardwareDepth;
                         passData.material = _feature._ssssMaterial;
                         passData.passIndex = 1;
 
                         builder.UseTexture(passData.source, AccessFlags.Read);
                         builder.SetRenderAttachment(tempLightingTarget, 0, AccessFlags.Write);
-                        builder.SetRenderAttachmentDepth(hardwareDepth, AccessFlags.Read);
+                        builder.UseTexture(passData.depth, AccessFlags.Read);
                         builder.UseTexture(ssssProfileTarget, AccessFlags.Read);
                         builder.UseTexture(ssssProfileExtraTarget, AccessFlags.Read);
                         builder.AllowGlobalStateModification(true);
 
                         builder.SetRenderFunc((SSSSPassData data, RasterGraphContext context) =>
                         {
+                            BindLightingDepth(context.cmd, data.depth);
                             context.cmd.SetGlobalTexture(SSSSProfileTextureID, ssssProfileTarget);
                             context.cmd.SetGlobalTexture(SSSSProfileExtraTextureID, ssssProfileExtraTarget);
                             Blitter.BlitTexture(context.cmd, data.source, new Vector4(1, 1, 0, 0), data.material, data.passIndex);

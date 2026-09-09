@@ -8,7 +8,8 @@ namespace LoogaSoft.Shadows
         public static readonly int MainLightShadowTexture = Shader.PropertyToID("_LoogaMainLightShadowTexture");
         public static readonly int DebugFinalTexture = Shader.PropertyToID("_LoogaDebugFinalTexture");
         public static readonly int DebugRawTexture = Shader.PropertyToID("_LoogaDebugRawTexture");
-        public static readonly int CameraDepthTexture = Shader.PropertyToID("_CameraDepthTexture");
+        public static readonly int ShadowDepthTexture = Shader.PropertyToID("_LoogaShadowDepthTexture");
+        public static readonly int ShadowDepthTexelSize = Shader.PropertyToID("_LoogaShadowDepthTexture_TexelSize");
         public static readonly int CameraNormalsTexture = Shader.PropertyToID("_CameraNormalsTexture");
         public static readonly int VirtualShadowAtlas = Shader.PropertyToID("_LoogaVirtualShadowAtlas");
         public static readonly int VirtualShadowDepthAtlas = Shader.PropertyToID("_LoogaVirtualShadowDepthAtlas");

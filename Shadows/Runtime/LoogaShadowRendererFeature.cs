@@ -1130,8 +1130,11 @@ namespace LoogaSoft.Shadows
                         ? data.CameraNormals
                         : null;
                     context.cmd.SetGlobalTexture(
-                        LoogaShadowShaderIds.CameraDepthTexture,
+                        LoogaShadowShaderIds.ShadowDepthTexture,
                         cameraDepth);
+                    context.cmd.SetGlobalVector(LoogaShadowShaderIds.ShadowDepthTexelSize,
+                        new Vector4(1f / cameraDepth.rt.width, 1f / cameraDepth.rt.height,
+                            cameraDepth.rt.width, cameraDepth.rt.height));
                     if (cameraNormals != null)
                     {
                         context.cmd.SetGlobalTexture(
