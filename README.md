@@ -1,6 +1,6 @@
 # Looga Graphics Pro
 
-Looga Graphics Pro unifies Looga Lighting, custom light attenuation, GTAO, bent normals, and virtual shadows for Unity 6 URP Deferred+.
+Looga Graphics Pro unifies Looga Lighting, runtime virtual texturing, custom light attenuation, GTAO, bent normals, and virtual shadows for Unity 6 URP Deferred+.
 
 ## Renderer Setup
 
@@ -8,9 +8,14 @@ Looga Graphics Pro unifies Looga Lighting, custom light attenuation, GTAO, bent 
 - Set the Universal Renderer to **Deferred+**.
 - Add **Looga GTAO**, then **Looga Lighting**, to the renderer feature list.
 - Add **Looga Shadows** when the renderer should use Looga virtual shadows.
+- Add **Looga Runtime Virtual Texture** when shaders need a camera-centered world-space surface cache.
 - URP shadow masks, mixed lighting, light cookies, light layers, screen-space AO, reflection probes, and deferred decals are consumed by Looga's lighting pass.
 
 Each system remains independently configurable. Looga GTAO can generate ambient occlusion only, or ambient occlusion plus bent normals. Bent normals are enabled by default to preserve the package's original GTBN behavior.
+
+## Runtime Virtual Texturing
+
+Looga Runtime Virtual Texturing renders four packed, camera-centered clipmaps. The cache stores albedo, world normal, height, smoothness, metallic, coverage, and a custom mask. Receiver shaders use the provided HLSL sampling contract. See [Runtime Virtual Texturing](Documentation~/runtime-virtual-texturing.md) for setup and current limits.
 
 ## Light Attenuation
 

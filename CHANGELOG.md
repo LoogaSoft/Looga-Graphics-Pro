@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 - 2026-09-10
+
+- Add a URP RenderGraph runtime virtual texture renderer feature.
+- Add four packed and texel-snapped surface clipmaps.
+- Keep a persistent cache for each camera and rebuild it at page boundaries.
+- Add explicit every-frame and request-driven cache refresh paths.
+- Store albedo, normal, height, smoothness, metallic, coverage, and a custom mask.
+- Add the shared HLSL receiver contract and focused clipmap math tests.
+
 ## 1.2.0 - 2026-09-10
 
 - Add separate renderer-default attenuation profiles for point and spot lights.
