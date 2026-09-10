@@ -7,18 +7,21 @@ namespace LoogaSoft.Lighting.Tests
     {
         private GameObject _gameObject;
         private LoogaLightAttenuation _attenuation;
+        private LoogaLightingFeature _lightingFeature;
 
         [SetUp]
         public void SetUp()
         {
             _gameObject = new GameObject("Looga light attenuation test");
             _attenuation = _gameObject.AddComponent<LoogaLightAttenuation>();
+            _lightingFeature = ScriptableObject.CreateInstance<LoogaLightingFeature>();
         }
 
         [TearDown]
         public void TearDown()
         {
             Object.DestroyImmediate(_gameObject);
+            Object.DestroyImmediate(_lightingFeature);
         }
 
         [Test]
@@ -87,6 +90,53 @@ namespace LoogaSoft.Lighting.Tests
             Assert.That(_attenuation.RangeFadeStart, Is.EqualTo(0.99f));
             Assert.That(_attenuation.SourceRadius, Is.EqualTo(0.001f));
             Assert.That(_attenuation.FalloffExponent, Is.EqualTo(8f));
+        }
+
+        [Test]
+        public void SharedRendererDefaultAppliesToPointAndSpotLights()
+        {
+            _lightingFeature.lightAttenuationConfiguration =
+                LoogaLightingFeature.LightAttenuationConfiguration.Shared;
+            _lightingFeature.defaultLightAttenuation =
+                LoogaLightAttenuationMode.Quadratic;
+            _lightingFeature.pointLightAttenuation = LoogaLightAttenuationMode.Linear;
+            _lightingFeature.spotLightAttenuation = LoogaLightAttenuationMode.Power;
+
+            Assert.That(
+                _lightingFeature.GetDefaultAttenuationMode(LightType.Point),
+                Is.EqualTo(LoogaLightAttenuationMode.Quadratic));
+            Assert.That(
+                _lightingFeature.GetDefaultAttenuationMode(LightType.Spot),
+                Is.EqualTo(LoogaLightAttenuationMode.Quadratic));
+        }
+
+        [Test]
+        public void PerTypeRendererDefaultsSelectPointAndSpotModes()
+        {
+            _lightingFeature.lightAttenuationConfiguration =
+                LoogaLightingFeature.LightAttenuationConfiguration.PerLightType;
+            _lightingFeature.pointLightAttenuation = LoogaLightAttenuationMode.Linear;
+            _lightingFeature.spotLightAttenuation = LoogaLightAttenuationMode.Power;
+
+            Assert.That(
+                _lightingFeature.GetDefaultAttenuationMode(LightType.Point),
+                Is.EqualTo(LoogaLightAttenuationMode.Linear));
+            Assert.That(
+                _lightingFeature.GetDefaultAttenuationMode(LightType.Spot),
+                Is.EqualTo(LoogaLightAttenuationMode.Power));
+        }
+
+        [Test]
+        public void UnsupportedLightTypeUsesSharedDefault()
+        {
+            _lightingFeature.lightAttenuationConfiguration =
+                LoogaLightingFeature.LightAttenuationConfiguration.PerLightType;
+            _lightingFeature.defaultLightAttenuation =
+                LoogaLightAttenuationMode.UrpDefault;
+
+            Assert.That(
+                _lightingFeature.GetDefaultAttenuationMode(LightType.Directional),
+                Is.EqualTo(LoogaLightAttenuationMode.UrpDefault));
         }
     }
 }

@@ -9,6 +9,10 @@ Open the **Looga Lighting** renderer feature. Select a mode in the **Light
 Attenuation** section. The selected mode applies to point and spot lights that do
 not contain a `Looga Light Attenuation` component.
 
+Set **Defaults** to **Shared** to use one profile for point and spot lights.
+Set **Defaults** to **Per Light Type** to configure each light type separately.
+Each type has independent mode, radius, fade, exponent, and curve values.
+
 Use **URP Default** when the project must match standard URP lighting.
 
 ## Override one light
@@ -43,4 +47,3 @@ selected curve.
 Looga applies custom attenuation in Deferred+ and in Looga forward shaders that
 use the shared lighting include. Third-party forward shaders continue to use
 their own attenuation code.
-

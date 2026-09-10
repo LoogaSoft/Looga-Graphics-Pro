@@ -26,10 +26,7 @@ namespace LoogaSoft.Lighting.Editor
 
             DrawSection("Light Attenuation", "LoogaLightingFeature.LightAttenuation", true, () =>
             {
-                DrawProperty(
-                    serializedObject,
-                    "defaultLightAttenuation",
-                    "Default Attenuation");
+                DrawProperty(serializedObject, "lightAttenuationConfiguration", "Defaults");
                 DrawDefaultAttenuationProperties();
             });
 
@@ -63,10 +60,76 @@ namespace LoogaSoft.Lighting.Editor
 
         private void DrawDefaultAttenuationProperties()
         {
-            SerializedProperty modeProperty =
-                serializedObject.FindProperty("defaultLightAttenuation");
-            if (modeProperty == null)
+            SerializedProperty configurationProperty =
+                serializedObject.FindProperty("lightAttenuationConfiguration");
+            if (configurationProperty == null)
                 return;
+
+            LoogaLightingFeature.LightAttenuationConfiguration configuration =
+                (LoogaLightingFeature.LightAttenuationConfiguration)
+                configurationProperty.enumValueIndex;
+            bool changesFalloff;
+
+            if (configuration ==
+                LoogaLightingFeature.LightAttenuationConfiguration.PerLightType)
+            {
+                changesFalloff = DrawAttenuationProfile(
+                    "Point Lights",
+                    "pointLightAttenuation",
+                    "pointRangeFadeStart",
+                    "pointSourceRadius",
+                    "pointFalloffExponent",
+                    "pointAttenuationCurve");
+                EditorGUILayout.Space(4f);
+                changesFalloff |= DrawAttenuationProfile(
+                    "Spot Lights",
+                    "spotLightAttenuation",
+                    "spotRangeFadeStart",
+                    "spotSourceRadius",
+                    "spotFalloffExponent",
+                    "spotAttenuationCurve");
+            }
+            else
+            {
+                changesFalloff = DrawAttenuationProfile(
+                    null,
+                    "defaultLightAttenuation",
+                    "defaultRangeFadeStart",
+                    "defaultSourceRadius",
+                    "defaultFalloffExponent",
+                    "defaultAttenuationCurve");
+            }
+
+            EditorGUILayout.HelpBox(
+                "Directional lights have no distance falloff. Looga does not modify baked area-light attenuation.",
+                MessageType.None);
+
+            if (changesFalloff)
+            {
+                EditorGUILayout.HelpBox(
+                    "This setting changes real-time falloff. Configure the active light baker to match custom attenuation.",
+                    MessageType.Info);
+            }
+        }
+
+        private bool DrawAttenuationProfile(
+            string heading,
+            string modePropertyName,
+            string rangeFadePropertyName,
+            string sourceRadiusPropertyName,
+            string falloffExponentPropertyName,
+            string curvePropertyName)
+        {
+            if (!string.IsNullOrEmpty(heading))
+            {
+                EditorGUILayout.LabelField(heading, EditorStyles.boldLabel);
+            }
+
+            DrawProperty(serializedObject, modePropertyName, "Attenuation");
+            SerializedProperty modeProperty =
+                serializedObject.FindProperty(modePropertyName);
+            if (modeProperty == null)
+                return false;
 
             LoogaLightAttenuationMode mode =
                 (LoogaLightAttenuationMode)modeProperty.enumValueIndex;
@@ -74,41 +137,24 @@ namespace LoogaSoft.Lighting.Editor
             switch (mode)
             {
                 case LoogaLightAttenuationMode.Physical:
-                    DrawProperty(
-                        serializedObject,
-                        "defaultSourceRadius",
-                        "Source Radius");
+                    DrawProperty(serializedObject, sourceRadiusPropertyName, "Source Radius");
                     break;
                 case LoogaLightAttenuationMode.SoftPhysical:
-                    DrawProperty(
-                        serializedObject,
-                        "defaultSourceRadius",
-                        "Source Radius");
-                    DrawProperty(
-                        serializedObject,
-                        "defaultRangeFadeStart",
-                        "Range Fade Start");
+                    DrawProperty(serializedObject, sourceRadiusPropertyName, "Source Radius");
+                    DrawProperty(serializedObject, rangeFadePropertyName, "Range Fade Start");
                     break;
                 case LoogaLightAttenuationMode.Power:
                     DrawProperty(
                         serializedObject,
-                        "defaultFalloffExponent",
+                        falloffExponentPropertyName,
                         "Falloff Exponent");
                     break;
                 case LoogaLightAttenuationMode.CustomCurve:
-                    DrawProperty(
-                        serializedObject,
-                        "defaultAttenuationCurve",
-                        "Attenuation Curve");
+                    DrawProperty(serializedObject, curvePropertyName, "Attenuation Curve");
                     break;
             }
 
-            if (mode != LoogaLightAttenuationMode.UrpDefault)
-            {
-                EditorGUILayout.HelpBox(
-                    "This setting changes real-time falloff. Configure the active light baker to match custom attenuation.",
-                    MessageType.Info);
-            }
+            return mode != LoogaLightAttenuationMode.UrpDefault;
         }
 
         private void DrawDeferredPlusWarning()

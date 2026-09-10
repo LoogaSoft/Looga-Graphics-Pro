@@ -39,9 +39,19 @@ namespace LoogaSoft.Lighting
             Custom = 100
         }
 
+        public enum LightAttenuationConfiguration
+        {
+            Shared = 0,
+            [InspectorName("Per Light Type")]
+            PerLightType = 1
+        }
+
         public LightingModel activeLightingModel = LightingModel.DisneyBurley;
         public LoogaLightingModelProfile customLightingModelProfile;
 
+        [InspectorName("Default Configuration")]
+        public LightAttenuationConfiguration lightAttenuationConfiguration =
+            LightAttenuationConfiguration.Shared;
         [InspectorName("Default Attenuation")]
         public LoogaLightAttenuationMode defaultLightAttenuation =
             LoogaLightAttenuationMode.UrpDefault;
@@ -53,6 +63,32 @@ namespace LoogaSoft.Lighting
         public float defaultFalloffExponent = 2f;
         [InspectorName("Attenuation Curve")]
         public AnimationCurve defaultAttenuationCurve =
+            AnimationCurve.EaseInOut(0f, 1f, 1f, 0f);
+
+        [InspectorName("Point Attenuation")]
+        public LoogaLightAttenuationMode pointLightAttenuation =
+            LoogaLightAttenuationMode.UrpDefault;
+        [InspectorName("Point Range Fade Start"), Range(0f, 0.99f)]
+        public float pointRangeFadeStart = 0.8f;
+        [InspectorName("Point Source Radius"), Min(0.001f)]
+        public float pointSourceRadius = 0.05f;
+        [InspectorName("Point Falloff Exponent"), Range(0.1f, 8f)]
+        public float pointFalloffExponent = 2f;
+        [InspectorName("Point Attenuation Curve")]
+        public AnimationCurve pointAttenuationCurve =
+            AnimationCurve.EaseInOut(0f, 1f, 1f, 0f);
+
+        [InspectorName("Spot Attenuation")]
+        public LoogaLightAttenuationMode spotLightAttenuation =
+            LoogaLightAttenuationMode.UrpDefault;
+        [InspectorName("Spot Range Fade Start"), Range(0f, 0.99f)]
+        public float spotRangeFadeStart = 0.8f;
+        [InspectorName("Spot Source Radius"), Min(0.001f)]
+        public float spotSourceRadius = 0.05f;
+        [InspectorName("Spot Falloff Exponent"), Range(0.1f, 8f)]
+        public float spotFalloffExponent = 2f;
+        [InspectorName("Spot Attenuation Curve")]
+        public AnimationCurve spotAttenuationCurve =
             AnimationCurve.EaseInOut(0f, 1f, 1f, 0f);
 
         [InspectorName("Enable Advanced Material Data")]
@@ -175,6 +211,27 @@ namespace LoogaSoft.Lighting
             Shader.SetGlobalInteger(AdditionalLightAttenuationCountID, 0);
             LoogaIndirectLightingController.EnsureGlobalsAreValid();
             UpdateLightingState();
+        }
+
+        /// <summary>
+        /// Gets the renderer default attenuation mode for a light type.
+        /// </summary>
+        /// <param name="lightType">The Unity light type.</param>
+        /// <returns>The shared or type-specific attenuation mode.</returns>
+        public LoogaLightAttenuationMode GetDefaultAttenuationMode(LightType lightType)
+        {
+            if (lightAttenuationConfiguration !=
+                LightAttenuationConfiguration.PerLightType)
+            {
+                return defaultLightAttenuation;
+            }
+
+            return lightType switch
+            {
+                LightType.Point => pointLightAttenuation,
+                LightType.Spot => spotLightAttenuation,
+                _ => defaultLightAttenuation
+            };
         }
 
         private void UpdateLightingState()
@@ -815,6 +872,17 @@ namespace LoogaSoft.Lighting
             private int BuildAdditionalLightAttenuationData(
                 UniversalLightData lightData)
             {
+                BuildDefaultAttenuationData(
+                    LightType.Point,
+                    out Vector4 pointParameters,
+                    out Vector4 pointCurveA,
+                    out Vector4 pointCurveB);
+                BuildDefaultAttenuationData(
+                    LightType.Spot,
+                    out Vector4 spotParameters,
+                    out Vector4 spotCurveA,
+                    out Vector4 spotCurveB);
+
                 int additionalLightIndex = 0;
 
                 for (int visibleLightIndex = 0;
@@ -855,21 +923,76 @@ namespace LoogaSoft.Lighting
                     }
                     else
                     {
-                        LoogaLightAttenuation.BuildShaderData(
-                            _feature.defaultLightAttenuation,
-                            _feature.defaultRangeFadeStart,
-                            _feature.defaultSourceRadius,
-                            _feature.defaultFalloffExponent,
-                            _feature.defaultAttenuationCurve,
-                            out _attenuationParameters[additionalLightIndex],
-                            out _attenuationCurveA[additionalLightIndex],
-                            out _attenuationCurveB[additionalLightIndex]);
+                        switch (visibleLight.lightType)
+                        {
+                            case LightType.Point:
+                                _attenuationParameters[additionalLightIndex] =
+                                    pointParameters;
+                                _attenuationCurveA[additionalLightIndex] = pointCurveA;
+                                _attenuationCurveB[additionalLightIndex] = pointCurveB;
+                                break;
+                            case LightType.Spot:
+                                _attenuationParameters[additionalLightIndex] =
+                                    spotParameters;
+                                _attenuationCurveA[additionalLightIndex] = spotCurveA;
+                                _attenuationCurveB[additionalLightIndex] = spotCurveB;
+                                break;
+                            default:
+                                _attenuationParameters[additionalLightIndex] = Vector4.zero;
+                                _attenuationCurveA[additionalLightIndex] = Vector4.zero;
+                                _attenuationCurveB[additionalLightIndex] = Vector4.zero;
+                                break;
+                        }
                     }
 
                     additionalLightIndex++;
                 }
 
                 return additionalLightIndex;
+            }
+
+            private void BuildDefaultAttenuationData(
+                LightType lightType,
+                out Vector4 parameters,
+                out Vector4 curveSamplesA,
+                out Vector4 curveSamplesB)
+            {
+                LoogaLightAttenuationMode mode =
+                    _feature.GetDefaultAttenuationMode(lightType);
+                float rangeFadeStart = _feature.defaultRangeFadeStart;
+                float sourceRadius = _feature.defaultSourceRadius;
+                float falloffExponent = _feature.defaultFalloffExponent;
+                AnimationCurve attenuationCurve = _feature.defaultAttenuationCurve;
+
+                if (_feature.lightAttenuationConfiguration ==
+                    LightAttenuationConfiguration.PerLightType)
+                {
+                    switch (lightType)
+                    {
+                        case LightType.Point:
+                            rangeFadeStart = _feature.pointRangeFadeStart;
+                            sourceRadius = _feature.pointSourceRadius;
+                            falloffExponent = _feature.pointFalloffExponent;
+                            attenuationCurve = _feature.pointAttenuationCurve;
+                            break;
+                        case LightType.Spot:
+                            rangeFadeStart = _feature.spotRangeFadeStart;
+                            sourceRadius = _feature.spotSourceRadius;
+                            falloffExponent = _feature.spotFalloffExponent;
+                            attenuationCurve = _feature.spotAttenuationCurve;
+                            break;
+                    }
+                }
+
+                LoogaLightAttenuation.BuildShaderData(
+                    mode,
+                    rangeFadeStart,
+                    sourceRadius,
+                    falloffExponent,
+                    attenuationCurve,
+                    out parameters,
+                    out curveSamplesA,
+                    out curveSamplesB);
             }
 
             private static void GetMainLightConstants(UniversalLightData lightData, out Vector4 lightPosition, out Vector4 lightColor)
