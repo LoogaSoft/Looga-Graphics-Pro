@@ -42,6 +42,19 @@ namespace LoogaSoft.Lighting
         public LightingModel activeLightingModel = LightingModel.DisneyBurley;
         public LoogaLightingModelProfile customLightingModelProfile;
 
+        [InspectorName("Default Attenuation")]
+        public LoogaLightAttenuationMode defaultLightAttenuation =
+            LoogaLightAttenuationMode.UrpDefault;
+        [InspectorName("Range Fade Start"), Range(0f, 0.99f)]
+        public float defaultRangeFadeStart = 0.8f;
+        [InspectorName("Source Radius"), Min(0.001f)]
+        public float defaultSourceRadius = 0.05f;
+        [InspectorName("Falloff Exponent"), Range(0.1f, 8f)]
+        public float defaultFalloffExponent = 2f;
+        [InspectorName("Attenuation Curve")]
+        public AnimationCurve defaultAttenuationCurve =
+            AnimationCurve.EaseInOut(0f, 1f, 1f, 0f);
+
         [InspectorName("Enable Advanced Material Data")]
         public bool enableAdvancedMaterialData = true;
         [InspectorName("Enable Subsurface Scattering")]
@@ -62,6 +75,16 @@ namespace LoogaSoft.Lighting
         private LoogaTonemapperPass _tonemapperPass;
 
         private static readonly int GlobalLightingModelID = Shader.PropertyToID("_LoogaLightingModel");
+        private static readonly int AdditionalLightAttenuationCountID =
+            Shader.PropertyToID("_LoogaAdditionalLightAttenuationCount");
+        private static readonly int AdditionalLightAttenuationPositionRangeID =
+            Shader.PropertyToID("_LoogaAdditionalLightAttenuationPositionRange");
+        private static readonly int AdditionalLightAttenuationParametersID =
+            Shader.PropertyToID("_LoogaAdditionalLightAttenuationParameters");
+        private static readonly int AdditionalLightAttenuationCurveAID =
+            Shader.PropertyToID("_LoogaAdditionalLightAttenuationCurveA");
+        private static readonly int AdditionalLightAttenuationCurveBID =
+            Shader.PropertyToID("_LoogaAdditionalLightAttenuationCurveB");
         private static readonly int GBufferNormalsAreOctID = Shader.PropertyToID("_LoogaGBufferNormalsAreOct");
         private static readonly int AdvancedMaterialDataEnabledID = Shader.PropertyToID("_LoogaAdvancedMaterialDataEnabled");
         private static readonly int SubsurfaceScatteringEnabledID = Shader.PropertyToID("_LoogaSubsurfaceScatteringEnabled");
@@ -149,6 +172,7 @@ namespace LoogaSoft.Lighting
         public override void Create()
         {
             name = FeatureDisplayName;
+            Shader.SetGlobalInteger(AdditionalLightAttenuationCountID, 0);
             LoogaIndirectLightingController.EnsureGlobalsAreValid();
             UpdateLightingState();
         }
@@ -343,6 +367,7 @@ namespace LoogaSoft.Lighting
 
             if (!IsDeferredPlusRenderer(renderer))
             {
+                Shader.SetGlobalInteger(AdditionalLightAttenuationCountID, 0);
                 if (renderingData.cameraData.postProcessEnabled)
                     EnqueueTonemapper(renderer);
                 return;
@@ -375,6 +400,7 @@ namespace LoogaSoft.Lighting
             Shader.SetGlobalInteger(AdvancedMaterialDataEnabledID, 0);
             Shader.SetGlobalInteger(SubsurfaceScatteringEnabledID, 0);
             Shader.SetGlobalInteger(BacklightingEnabledID, 0);
+            Shader.SetGlobalInteger(AdditionalLightAttenuationCountID, 0);
             if (_activeLightingMaterial != null) CoreUtils.Destroy(_activeLightingMaterial);
             if (_ssssMaterial != null) CoreUtils.Destroy(_ssssMaterial);
             if (_tonemapperMaterial != null) CoreUtils.Destroy(_tonemapperMaterial);
@@ -424,8 +450,18 @@ namespace LoogaSoft.Lighting
         // =======================================================================
         private class CustomLightingPass : ScriptableRenderPass
         {
+            private const int MaxVisibleAdditionalLights = 256;
+
             private LoogaLightingFeature _feature;
             private ScriptableRenderer _renderer;
+            private readonly Vector4[] _attenuationPositionRange =
+                new Vector4[MaxVisibleAdditionalLights];
+            private readonly Vector4[] _attenuationParameters =
+                new Vector4[MaxVisibleAdditionalLights];
+            private readonly Vector4[] _attenuationCurveA =
+                new Vector4[MaxVisibleAdditionalLights];
+            private readonly Vector4[] _attenuationCurveB =
+                new Vector4[MaxVisibleAdditionalLights];
 
             private static readonly int[] ShaderGBufferIDs = {
                 Shader.PropertyToID("_GBuffer0"), Shader.PropertyToID("_GBuffer1"),
@@ -476,6 +512,11 @@ namespace LoogaSoft.Lighting
                 public TextureHandle sourceColorTexture, depthTexture, ssssProfileTexture, ssssProfileExtraTexture, materialExtrasTexture, modelParametersTexture, renderingLayersTexture, shadowMaskTexture;
                 public Vector4 mainLightPosition;
                 public Vector4 mainLightColor;
+                public Vector4[] attenuationPositionRange;
+                public Vector4[] attenuationParameters;
+                public Vector4[] attenuationCurveA;
+                public Vector4[] attenuationCurveB;
+                public int attenuationLightCount;
                 public bool hasSSSSProfileTexture;
                 public bool useAccurateGBufferNormals;
             }
@@ -501,6 +542,7 @@ namespace LoogaSoft.Lighting
 
                 UniversalLightData lightData = frameData.Get<UniversalLightData>();
                 GetMainLightConstants(lightData, out Vector4 mainLightPosition, out Vector4 mainLightColor);
+                int attenuationLightCount = BuildAdditionalLightAttenuationData(lightData);
 
                 TextureHandle activeColor = resourceData.activeColorTexture;
                 TextureHandle hardwareDepth = resourceData.activeDepthTexture;
@@ -590,6 +632,11 @@ namespace LoogaSoft.Lighting
                     passData.modelParametersTexture = modelParametersTarget;
                     passData.mainLightPosition = mainLightPosition;
                     passData.mainLightColor = mainLightColor;
+                    passData.attenuationPositionRange = _attenuationPositionRange;
+                    passData.attenuationParameters = _attenuationParameters;
+                    passData.attenuationCurveA = _attenuationCurveA;
+                    passData.attenuationCurveB = _attenuationCurveB;
+                    passData.attenuationLightCount = attenuationLightCount;
                     passData.hasSSSSProfileTexture = ssssProfileTarget.IsValid();
                     passData.useAccurateGBufferNormals = UsesAccurateGBufferNormals(_renderer);
 
@@ -653,6 +700,24 @@ namespace LoogaSoft.Lighting
                         cmd.SetGlobalInteger(GBufferNormalsAreOctID, data.useAccurateGBufferNormals ? 1 : 0);
                         cmd.SetGlobalVector(MainLightPositionID, data.mainLightPosition);
                         cmd.SetGlobalVector(MainLightColorID, data.mainLightColor);
+                        cmd.SetGlobalInteger(
+                            AdditionalLightAttenuationCountID,
+                            data.attenuationLightCount);
+                        if (data.attenuationLightCount > 0)
+                        {
+                            cmd.SetGlobalVectorArray(
+                                AdditionalLightAttenuationPositionRangeID,
+                                data.attenuationPositionRange);
+                            cmd.SetGlobalVectorArray(
+                                AdditionalLightAttenuationParametersID,
+                                data.attenuationParameters);
+                            cmd.SetGlobalVectorArray(
+                                AdditionalLightAttenuationCurveAID,
+                                data.attenuationCurveA);
+                            cmd.SetGlobalVectorArray(
+                                AdditionalLightAttenuationCurveBID,
+                                data.attenuationCurveB);
+                        }
 
                         Blitter.BlitTexture(cmd, new Vector4(1,1,0,0), data.material, 0);
                     });
@@ -745,6 +810,66 @@ namespace LoogaSoft.Lighting
                         });
                     }
                 }
+            }
+
+            private int BuildAdditionalLightAttenuationData(
+                UniversalLightData lightData)
+            {
+                int additionalLightIndex = 0;
+
+                for (int visibleLightIndex = 0;
+                     visibleLightIndex < lightData.visibleLights.Length;
+                     visibleLightIndex++)
+                {
+                    if (visibleLightIndex == lightData.mainLightIndex)
+                        continue;
+
+                    if (additionalLightIndex >= MaxVisibleAdditionalLights)
+                        break;
+
+                    VisibleLight visibleLight = lightData.visibleLights[visibleLightIndex];
+                    Vector4 position = visibleLight.localToWorldMatrix.GetColumn(3);
+                    bool supportsDistanceAttenuation =
+                        visibleLight.lightType == LightType.Point ||
+                        visibleLight.lightType == LightType.Spot;
+                    float range = supportsDistanceAttenuation
+                        ? Mathf.Max(visibleLight.range, 0.001f)
+                        : 0f;
+                    _attenuationPositionRange[additionalLightIndex] = new Vector4(
+                        position.x,
+                        position.y,
+                        position.z,
+                        range);
+
+                    LoogaLightAttenuation attenuation = null;
+                    if (visibleLight.light != null)
+                    {
+                        visibleLight.light.TryGetComponent(out attenuation);
+                    }
+                    if (attenuation != null && attenuation.isActiveAndEnabled)
+                    {
+                        attenuation.GetShaderData(
+                            out _attenuationParameters[additionalLightIndex],
+                            out _attenuationCurveA[additionalLightIndex],
+                            out _attenuationCurveB[additionalLightIndex]);
+                    }
+                    else
+                    {
+                        LoogaLightAttenuation.BuildShaderData(
+                            _feature.defaultLightAttenuation,
+                            _feature.defaultRangeFadeStart,
+                            _feature.defaultSourceRadius,
+                            _feature.defaultFalloffExponent,
+                            _feature.defaultAttenuationCurve,
+                            out _attenuationParameters[additionalLightIndex],
+                            out _attenuationCurveA[additionalLightIndex],
+                            out _attenuationCurveB[additionalLightIndex]);
+                    }
+
+                    additionalLightIndex++;
+                }
+
+                return additionalLightIndex;
             }
 
             private static void GetMainLightConstants(UniversalLightData lightData, out Vector4 lightPosition, out Vector4 lightColor)

@@ -1,6 +1,6 @@
 # Looga Graphics Pro
 
-Looga Graphics Pro unifies Looga Lighting, GTAO, bent normals, and virtual shadows for Unity 6 URP Deferred+.
+Looga Graphics Pro unifies Looga Lighting, custom light attenuation, GTAO, bent normals, and virtual shadows for Unity 6 URP Deferred+.
 
 ## Renderer Setup
 
@@ -11,6 +11,18 @@ Looga Graphics Pro unifies Looga Lighting, GTAO, bent normals, and virtual shado
 - URP shadow masks, mixed lighting, light cookies, light layers, screen-space AO, reflection probes, and deferred decals are consumed by Looga's lighting pass.
 
 Each system remains independently configurable. Looga GTAO can generate ambient occlusion only, or ambient occlusion plus bent normals. Bent normals are enabled by default to preserve the package's original GTBN behavior.
+
+## Light Attenuation
+
+Looga Lighting uses URP light attenuation by default. The renderer feature can
+select a different project default for point and spot lights. Add **Looga Light
+Attenuation** to an individual Unity Light to override that default.
+
+The package supports physical, soft physical, linear, quadratic, power, and
+custom-curve modes. Looga preserves URP spot-cone attenuation, cookies, light
+layers, shadows, and screen-space ambient occlusion. See [Custom light
+attenuation](Documentation~/light-attenuation.md) for setup and baked-lighting
+limits.
 
 Tonemapping is controlled exclusively by the **Looga Tonemapper** Volume override. A new override defaults to **None** with all parameter overrides unchecked, so adding it leaves the image unchanged. Override its mode and choose a curve to opt in. See [Volume-controlled tonemapping](Documentation~/tonemapper.md) for usage and upgrade behavior.
 

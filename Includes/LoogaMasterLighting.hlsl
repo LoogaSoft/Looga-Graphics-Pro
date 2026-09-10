@@ -29,6 +29,8 @@
     #include "Packages/com.loogasoft.loogagraphicspro/Includes/Lighting Models/Configurable.hlsl"
 #endif
 
+#include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaLightAttenuation.hlsl"
+
 // ==============================================================================
 // MASTER DIRECT LIGHTING EVALUATION
 // ==============================================================================
@@ -95,14 +97,14 @@ float3 EvaluateLoogaAdditionalLights(float3 diffuseColor, float3 directF0, float
         [loop] for (uint lightIndex = 0; lightIndex < min(URP_FP_DIRECTIONAL_LIGHTS_COUNT, MAX_VISIBLE_LIGHTS); lightIndex++)
         {
             CLUSTER_LIGHT_LOOP_SUBTRACTIVE_LIGHT_CHECK
-            Light light = GetAdditionalLight(lightIndex, inputData, shadowMask, aoFactor);
+            Light light = GetLoogaAdditionalLight(lightIndex, inputData, shadowMask, aoFactor);
             color += EvaluateLoogaAdditionalLight(light, meshRenderingLayers, diffuseColor, directF0, perceptualRoughness, normalWS, occlusion, viewDirectionWS, NoV, modelParameters, forceReceiveShadowsOff, useSecondaryLobe, secondaryRoughness, lobeMix);
         }
     #endif
 
     uint pixelLightCount = GetAdditionalLightsCount();
     LIGHT_LOOP_BEGIN(pixelLightCount)
-        Light light = GetAdditionalLight(lightIndex, inputData, shadowMask, aoFactor);
+        Light light = GetLoogaAdditionalLight(lightIndex, inputData, shadowMask, aoFactor);
         color += EvaluateLoogaAdditionalLight(light, meshRenderingLayers, diffuseColor, directF0, perceptualRoughness, normalWS, occlusion, viewDirectionWS, NoV, modelParameters, forceReceiveShadowsOff, useSecondaryLobe, secondaryRoughness, lobeMix);
     LIGHT_LOOP_END
 
@@ -155,7 +157,7 @@ float3 EvaluateLoogaAdditionalBacklights(InputData inputData, half4 shadowMask,
         [loop] for (uint lightIndex = 0; lightIndex < min(URP_FP_DIRECTIONAL_LIGHTS_COUNT, MAX_VISIBLE_LIGHTS); lightIndex++)
         {
             CLUSTER_LIGHT_LOOP_SUBTRACTIVE_LIGHT_CHECK
-            Light light = GetAdditionalLight(lightIndex, inputData, shadowMask, aoFactor);
+            Light light = GetLoogaAdditionalLight(lightIndex, inputData, shadowMask, aoFactor);
             color += EvaluateLoogaAdditionalBacklight(light, meshRenderingLayers, scatteringColor,
                 scatterWidth, ambientScatterStrength, transmissionShadowSoftness, rimPower,
                 distortion, normalWS, viewDirectionWS, transmissionMask, forceReceiveShadowsOff);
@@ -164,7 +166,7 @@ float3 EvaluateLoogaAdditionalBacklights(InputData inputData, half4 shadowMask,
 
     uint pixelLightCount = GetAdditionalLightsCount();
     LIGHT_LOOP_BEGIN(pixelLightCount)
-        Light light = GetAdditionalLight(lightIndex, inputData, shadowMask, aoFactor);
+        Light light = GetLoogaAdditionalLight(lightIndex, inputData, shadowMask, aoFactor);
         color += EvaluateLoogaAdditionalBacklight(light, meshRenderingLayers, scatteringColor,
             scatterWidth, ambientScatterStrength, transmissionShadowSoftness, rimPower,
             distortion, normalWS, viewDirectionWS, transmissionMask, forceReceiveShadowsOff);
