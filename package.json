@@ -2,7 +2,7 @@
   "displayName": "Looga Graphics Pro",
   "name": "com.loogasoft.loogagraphicspro",
   "description": "A unified Unity 6 URP graphics package for Looga lighting, runtime virtual texturing, custom light attenuation, GTAO, bent normals, and virtual shadows.",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "author": {
     "name": "LoogaSoft"
   },

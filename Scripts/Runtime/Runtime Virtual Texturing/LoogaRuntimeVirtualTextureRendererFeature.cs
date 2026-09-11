@@ -52,6 +52,8 @@ namespace LoogaSoft.Rendering.VirtualTexturing
         [HideInInspector] public Shader writerShader;
 
         private LoogaRuntimeVirtualTexturePass _pass;
+        private readonly Dictionary<Camera, Matrix4x4> _savedCullingMatrices = new();
+        private bool _cullingCallbacksRegistered;
         private static uint _refreshVersion;
 
         /// <summary>
@@ -88,6 +90,7 @@ namespace LoogaSoft.Rendering.VirtualTexturing
 
             _pass ??= new LoogaRuntimeVirtualTexturePass();
             _pass.renderPassEvent = RenderPassEvent.BeforeRenderingPrePasses;
+            RegisterCullingCallbacks();
             Shader.SetGlobalInteger(LoogaRuntimeVirtualTextureShaderIds.Enabled, 0);
         }
 
@@ -105,9 +108,85 @@ namespace LoogaSoft.Rendering.VirtualTexturing
 
         protected override void Dispose(bool disposing)
         {
+            UnregisterCullingCallbacks();
             Shader.SetGlobalInteger(LoogaRuntimeVirtualTextureShaderIds.Enabled, 0);
+            Shader.SetGlobalTexture(LoogaRuntimeVirtualTextureShaderIds.AlbedoAtlas, Texture2D.blackTexture);
+            Shader.SetGlobalTexture(LoogaRuntimeVirtualTextureShaderIds.NormalAtlas, Texture2D.blackTexture);
+            Shader.SetGlobalTexture(LoogaRuntimeVirtualTextureShaderIds.HeightAtlas, Texture2D.blackTexture);
             _pass?.Dispose();
             _pass = null;
+        }
+
+        private void RegisterCullingCallbacks()
+        {
+            if (_cullingCallbacksRegistered)
+                return;
+
+            RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
+            RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
+            _cullingCallbacksRegistered = true;
+        }
+
+        private void UnregisterCullingCallbacks()
+        {
+            if (!_cullingCallbacksRegistered)
+                return;
+
+            RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
+            RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
+            _cullingCallbacksRegistered = false;
+
+            foreach (KeyValuePair<Camera, Matrix4x4> entry in _savedCullingMatrices)
+            {
+                if (entry.Key != null)
+                    entry.Key.cullingMatrix = entry.Value;
+            }
+
+            _savedCullingMatrices.Clear();
+        }
+
+        private void OnBeginCameraRendering(ScriptableRenderContext context, Camera camera)
+        {
+            if (!isActive || writerShader == null || !ShouldRenderCamera(camera))
+                return;
+
+            if (_savedCullingMatrices.ContainsKey(camera))
+                return;
+
+            _savedCullingMatrices.Add(camera, camera.cullingMatrix);
+            camera.cullingMatrix = BuildCaptureCullingMatrix(camera.transform.position);
+        }
+
+        private void OnEndCameraRendering(ScriptableRenderContext context, Camera camera)
+        {
+            if (!_savedCullingMatrices.Remove(camera, out Matrix4x4 cullingMatrix))
+                return;
+
+            camera.cullingMatrix = cullingMatrix;
+        }
+
+        private Matrix4x4 BuildCaptureCullingMatrix(Vector3 cameraPosition)
+        {
+            int level = Mathf.Clamp(clipmapCount, 1, LoogaRuntimeVirtualTextureMath.MaximumClipmapCount) - 1;
+            float extent = LoogaRuntimeVirtualTextureMath.GetExtent(firstClipmapExtent, level);
+            Vector2 center = LoogaRuntimeVirtualTextureMath.SnapCenter(
+                cameraPosition,
+                extent,
+                pagesPerClipmapAxis);
+            float nearPlane = Mathf.Max(0.01f, capturePadding);
+            float maximumHeight = Mathf.Max(minimumWorldHeight + 1f, maximumWorldHeight);
+            float farPlane = maximumHeight - minimumWorldHeight + nearPlane * 2f;
+            Vector3 capturePosition = new(center.x, maximumHeight + nearPlane, center.y);
+            Quaternion captureRotation = Quaternion.LookRotation(Vector3.down, Vector3.forward);
+            Matrix4x4 view = Matrix4x4.TRS(capturePosition, captureRotation, Vector3.one).inverse;
+            Matrix4x4 projection = Matrix4x4.Ortho(
+                -extent * 0.5f,
+                extent * 0.5f,
+                -extent * 0.5f,
+                extent * 0.5f,
+                nearPlane,
+                farPlane);
+            return projection * view;
         }
 
         private bool ShouldRenderCamera(Camera camera)
@@ -242,6 +321,15 @@ namespace LoogaSoft.Rendering.VirtualTexturing
 
                 CameraResources resources = GetCameraResources(_camera);
                 bool resourcesChanged = EnsureResources(resources, atlasResolution);
+                Shader.SetGlobalTexture(
+                    LoogaRuntimeVirtualTextureShaderIds.AlbedoAtlas,
+                    resources.AlbedoAtlas);
+                Shader.SetGlobalTexture(
+                    LoogaRuntimeVirtualTextureShaderIds.NormalAtlas,
+                    resources.NormalAtlas);
+                Shader.SetGlobalTexture(
+                    LoogaRuntimeVirtualTextureShaderIds.HeightAtlas,
+                    resources.HeightAtlas);
                 bool centerChanged = BuildClipmaps(
                     cameraData,
                     clipmapCount,
@@ -339,15 +427,6 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                     builder.UseTexture(normalAtlas, AccessFlags.Read);
                     builder.UseTexture(heightAtlas, AccessFlags.Read);
                 }
-                builder.SetGlobalTextureAfterPass(
-                    albedoAtlas,
-                    LoogaRuntimeVirtualTextureShaderIds.AlbedoAtlas);
-                builder.SetGlobalTextureAfterPass(
-                    normalAtlas,
-                    LoogaRuntimeVirtualTextureShaderIds.NormalAtlas);
-                builder.SetGlobalTextureAfterPass(
-                    heightAtlas,
-                    LoogaRuntimeVirtualTextureShaderIds.HeightAtlas);
                 builder.AllowGlobalStateModification(true);
                 builder.AllowPassCulling(false);
 
@@ -484,6 +563,7 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                     SortingCriteria.CommonOpaque);
                 drawingSettings.overrideShader = _writerShader;
                 drawingSettings.overrideShaderPassIndex = 0;
+                drawingSettings.enableInstancing = false;
 
                 RendererListParams rendererListParams = new(
                     renderingData.cullResults,

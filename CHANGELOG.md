@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.2 - 2026-09-10
+
+- Bind persistent runtime virtual texture atlases through their `RTHandle` objects so shader consumers retain valid cache textures across RenderGraph frames.
+- Expand camera culling to the largest RVT clipmap during capture and restore the original culling matrix after rendering.
+- Disable incompatible GPU instancing for the generic RVT override shader to prevent terrain instance-property warnings.
+
 ## 1.3.1 - 2026-09-10
 
 - Give each runtime virtual texture clipmap its own RenderGraph renderer list.
