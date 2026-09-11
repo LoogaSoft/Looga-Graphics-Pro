@@ -173,7 +173,10 @@ namespace LoogaSoft.Rendering.VirtualTexturing
 
             private sealed class PassData
             {
-                public RendererListHandle RendererList;
+                public RendererListHandle RendererList0;
+                public RendererListHandle RendererList1;
+                public RendererListHandle RendererList2;
+                public RendererListHandle RendererList3;
                 public int ClipmapCount;
                 public int TileResolution;
                 public float MinimumHeight;
@@ -186,6 +189,18 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                 public Matrix4x4 CameraView;
                 public Matrix4x4 CameraProjection;
                 public bool RebuildCache;
+
+                public RendererListHandle GetRendererList(int index)
+                {
+                    return index switch
+                    {
+                        0 => RendererList0,
+                        1 => RendererList1,
+                        2 => RendererList2,
+                        3 => RendererList3,
+                        _ => default
+                    };
+                }
             }
 
             public void Dispose()
@@ -248,13 +263,33 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                 resources.ConfigurationHash = configurationHash;
                 resources.RefreshVersion = _refreshVersion;
 
-                RendererListHandle rendererList = CreateRendererList(
-                    renderGraph,
-                    renderingData,
-                    cameraData,
-                    lightData);
-                if (!rendererList.IsValid())
-                    return;
+                RendererListHandle rendererList0 = default;
+                RendererListHandle rendererList1 = default;
+                RendererListHandle rendererList2 = default;
+                RendererListHandle rendererList3 = default;
+
+                if (rebuildCache)
+                {
+                    rendererList0 = CreateRendererList(
+                        renderGraph,
+                        renderingData,
+                        cameraData,
+                        lightData);
+                    if (clipmapCount > 1)
+                        rendererList1 = CreateRendererList(renderGraph, renderingData, cameraData, lightData);
+                    if (clipmapCount > 2)
+                        rendererList2 = CreateRendererList(renderGraph, renderingData, cameraData, lightData);
+                    if (clipmapCount > 3)
+                        rendererList3 = CreateRendererList(renderGraph, renderingData, cameraData, lightData);
+
+                    if (!rendererList0.IsValid() ||
+                        clipmapCount > 1 && !rendererList1.IsValid() ||
+                        clipmapCount > 2 && !rendererList2.IsValid() ||
+                        clipmapCount > 3 && !rendererList3.IsValid())
+                    {
+                        return;
+                    }
+                }
 
                 TextureHandle albedoAtlas = renderGraph.ImportTexture(resources.AlbedoAtlas);
                 TextureHandle normalAtlas = renderGraph.ImportTexture(resources.NormalAtlas);
@@ -266,7 +301,10 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                     out PassData passData,
                     _profilingSampler);
 
-                passData.RendererList = rendererList;
+                passData.RendererList0 = rendererList0;
+                passData.RendererList1 = rendererList1;
+                passData.RendererList2 = rendererList2;
+                passData.RendererList3 = rendererList3;
                 passData.ClipmapCount = clipmapCount;
                 passData.TileResolution = tileResolution;
                 passData.MinimumHeight = minimumHeight;
@@ -280,11 +318,27 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                 passData.CameraProjection = cameraData.GetProjectionMatrix();
                 passData.RebuildCache = rebuildCache;
 
-                builder.UseRendererList(rendererList);
-                builder.SetRenderAttachment(albedoAtlas, 0, AccessFlags.Write);
-                builder.SetRenderAttachment(normalAtlas, 1, AccessFlags.Write);
-                builder.SetRenderAttachment(heightAtlas, 2, AccessFlags.Write);
-                builder.SetRenderAttachmentDepth(depthAtlas, AccessFlags.Write);
+                if (rebuildCache)
+                {
+                    builder.UseRendererList(rendererList0);
+                    if (clipmapCount > 1)
+                        builder.UseRendererList(rendererList1);
+                    if (clipmapCount > 2)
+                        builder.UseRendererList(rendererList2);
+                    if (clipmapCount > 3)
+                        builder.UseRendererList(rendererList3);
+
+                    builder.SetRenderAttachment(albedoAtlas, 0, AccessFlags.Write);
+                    builder.SetRenderAttachment(normalAtlas, 1, AccessFlags.Write);
+                    builder.SetRenderAttachment(heightAtlas, 2, AccessFlags.Write);
+                    builder.SetRenderAttachmentDepth(depthAtlas, AccessFlags.Write);
+                }
+                else
+                {
+                    builder.UseTexture(albedoAtlas, AccessFlags.Read);
+                    builder.UseTexture(normalAtlas, AccessFlags.Read);
+                    builder.UseTexture(heightAtlas, AccessFlags.Read);
+                }
                 builder.SetGlobalTextureAfterPass(
                     albedoAtlas,
                     LoogaRuntimeVirtualTextureShaderIds.AlbedoAtlas);
@@ -331,7 +385,7 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                             context.cmd.SetViewProjectionMatrices(
                                 data.ViewMatrices[level],
                                 data.ProjectionMatrices[level]);
-                            context.cmd.DrawRendererList(data.RendererList);
+                            context.cmd.DrawRendererList(data.GetRendererList(level));
                         }
                     }
 

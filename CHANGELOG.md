@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1 - 2026-09-10
+
+- Give each runtime virtual texture clipmap its own RenderGraph renderer list.
+- Preserve persistent atlas contents when a cache rebuild is not required.
+
 ## 1.3.0 - 2026-09-10
 
 - Add a URP RenderGraph runtime virtual texture renderer feature.
