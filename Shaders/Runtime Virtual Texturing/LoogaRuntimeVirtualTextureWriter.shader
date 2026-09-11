@@ -13,6 +13,7 @@ Shader "Hidden/LoogaSoft/Runtime Virtual Texture/Writer"
         _AlphaClipThreshold ("URP Alpha Clip", Float) = 0
         _Cutoff ("Alpha Cutoff", Range(0, 1)) = 0.5
         _LoogaRvtMask ("RVT Mask", Range(0, 1)) = 1
+        [Toggle] _LoogaRvtUseMask ("Use RVT Mask", Float) = 0
     }
 
     SubShader
@@ -25,7 +26,7 @@ Shader "Hidden/LoogaSoft/Runtime Virtual Texture/Writer"
             Tags { "LightMode" = "SRPDefaultUnlit" }
             ZWrite On
             ZTest LEqual
-            Cull Back
+            Cull Off
 
             HLSLPROGRAM
             #pragma target 4.5
@@ -78,9 +79,12 @@ Shader "Hidden/LoogaSoft/Runtime Virtual Texture/Writer"
                 half _AlphaClipThreshold;
                 half _Cutoff;
                 half _LoogaRvtMask;
+                half _LoogaRvtUseMask;
+                half _LoogaRvtReceiverOnly;
             CBUFFER_END
 
             float4 _LoogaRvtHeightRange;
+            float4 _TerrainHeightmapScale;
 
             half2 EncodeOctahedralNormal(half3 normal)
             {
@@ -97,8 +101,8 @@ Shader "Hidden/LoogaSoft/Runtime Virtual Texture/Writer"
 
             half2 EncodeHeight(float normalizedHeight)
             {
-                half clampedHeight = min(saturate(normalizedHeight), 0.99998h);
-                half2 encoded = frac(clampedHeight * half2(1.0h, 255.0h));
+                float clampedHeight = min(saturate(normalizedHeight), 1.0 - 1.0 / 65535.0);
+                float2 encoded = frac(clampedHeight * float2(1.0, 255.0));
                 encoded.x -= encoded.y / 255.0h;
                 return encoded;
             }
@@ -122,7 +126,10 @@ Shader "Hidden/LoogaSoft/Runtime Virtual Texture/Writer"
             FragmentOutput Frag(Varyings input)
             {
                 UNITY_SETUP_INSTANCE_ID(input);
+                clip(_TerrainHeightmapScale.y > 0 ? -1 : 1);
+                clip(0.5h - _LoogaRvtReceiverOnly);
                 FragmentOutput output;
+                clip(_BaseColor.a - 0.0001h);
                 half4 albedo = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv) * _BaseColor;
                 if (max(_AlphaClip, _AlphaClipThreshold) > 0.5h)
                     clip(albedo.a - _Cutoff);
@@ -150,7 +157,7 @@ Shader "Hidden/LoogaSoft/Runtime Virtual Texture/Writer"
                     saturate(_Metallic));
                 output.heightMask = half4(
                     EncodeHeight(normalizedHeight),
-                    saturate(_LoogaRvtMask),
+                    lerp(1.0h, saturate(_LoogaRvtMask), saturate(_LoogaRvtUseMask)),
                     1.0h);
                 return output;
             }

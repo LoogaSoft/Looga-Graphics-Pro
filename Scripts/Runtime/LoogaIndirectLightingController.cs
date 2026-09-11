@@ -47,6 +47,7 @@ namespace LoogaSoft.Lighting
         private static LoogaIndirectLightingController s_Active;
         private static GraphicsBuffer s_FallbackReflectionProbeBuffer;
         private GraphicsBuffer _reflectionProbeBuffer;
+        private static bool _isQuitting;
 
         private static readonly int ReflectionProbeCountId = Shader.PropertyToID("_LoogaReflectionProbeCount");
         private static readonly int ReflectionProbeDataId = Shader.PropertyToID("_LoogaReflectionProbeData");
@@ -76,6 +77,9 @@ namespace LoogaSoft.Lighting
         private static void ResetGlobalState()
         {
             s_Active = null;
+            _isQuitting = false;
+            Application.quitting -= OnApplicationQuitting;
+            Application.quitting += OnApplicationQuitting;
             ReleaseFallbackResources();
             DisableGlobalValues();
         }
@@ -257,6 +261,10 @@ namespace LoogaSoft.Lighting
 
         private static void BindFallbackReflectionProbeBuffer()
         {
+            if (_isQuitting)
+            {
+                return;
+            }
             if (s_FallbackReflectionProbeBuffer == null)
             {
                 s_FallbackReflectionProbeBuffer = new GraphicsBuffer(
@@ -267,6 +275,17 @@ namespace LoogaSoft.Lighting
             }
 
             Shader.SetGlobalBuffer(ReflectionProbeDataId, s_FallbackReflectionProbeBuffer);
+        }
+
+        private static void OnApplicationQuitting()
+        {
+            _isQuitting = true;
+            DisableGlobalValues();
+            if (s_Active)
+            {
+                s_Active.ReleaseBuffer();
+            }
+            ReleaseFallbackResources();
         }
 
         public static void ReleaseFallbackResources()

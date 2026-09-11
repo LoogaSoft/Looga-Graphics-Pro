@@ -86,3 +86,7 @@ The **Looga GTAO** renderer feature owns ground-truth ambient occlusion. Enable 
 ## Virtual Shadows
 
 The **Looga Shadows** renderer feature owns the package's virtual shadow-map path. Its runtime, editor tooling, validation content, and documentation live under the `Shadows` module in this package.
+
+## Streaming virtual texturing
+
+Graphics Pro includes an optional disk-tile streaming module for opaque mesh materials. It has offline texture baking, GPU feedback, bounded residency, parent-mip fallback, and inspector diagnostics. Looga Terrain remains independent. See [Streaming virtual texturing](Documentation~/streaming-virtual-texturing.md) for setup, budgets, and compatibility limits.

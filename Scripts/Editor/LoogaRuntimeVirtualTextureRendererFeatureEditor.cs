@@ -42,10 +42,11 @@ namespace LoogaSoft.Lighting.Editor
 
             DrawSection("Capture", "LoogaRVT.Capture", false, () =>
             {
+                DrawProperty(serializedObject, "terrainWriters", "Terrain Writers");
                 DrawProperty(serializedObject, "capturePadding", "Vertical Padding");
                 DrawProperty(serializedObject, "includeAlphaTestedGeometry", "Include Alpha Tested");
                 EditorGUILayout.HelpBox(
-                    "The current camera culling results limit writers. The cache always covers visible geometry and does not run a second CPU cull.",
+                    "A separate top-down cull runs only when the cache rebuilds. The viewing camera remains unchanged.",
                     MessageType.Info);
             });
 

@@ -9,6 +9,22 @@ namespace LoogaSoft.Rendering.VirtualTexturing
     {
         public const int MaximumClipmapCount = 4;
 
+        /// <summary>Gets a top-down view with the same handedness as a Unity camera.</summary>
+        public static Matrix4x4 GetCaptureView(Vector2 center, float height)
+        {
+            Quaternion rotation = Quaternion.LookRotation(Vector3.down, Vector3.forward);
+            return Matrix4x4.Scale(new Vector3(1f, 1f, -1f)) * Matrix4x4.TRS(
+                new Vector3(center.x, height, center.y), rotation, Vector3.one).inverse;
+        }
+
+        /// <summary>Converts a GPU projection for use with depth clear 1 and a less-equal depth test.</summary>
+        public static Matrix4x4 ToForwardDepthProjection(Matrix4x4 gpuProjection, bool reversedDepth)
+        {
+            if (reversedDepth)
+                gpuProjection.SetRow(2, gpuProjection.GetRow(3) - gpuProjection.GetRow(2));
+            return gpuProjection;
+        }
+
         /// <summary>
         /// Snaps an XZ position to the texel grid for a clipmap level.
         /// </summary>

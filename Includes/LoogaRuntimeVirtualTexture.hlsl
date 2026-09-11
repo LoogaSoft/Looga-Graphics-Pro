@@ -38,7 +38,7 @@ half3 LoogaRvtDecodeOctahedralNormal(half2 encoded)
     return normalize(normal);
 }
 
-float LoogaRvtDecodeHeight(half2 encoded)
+float LoogaRvtDecodeHeight(float2 encoded)
 {
     float normalizedHeight = dot(encoded, float2(1.0, 1.0 / 255.0));
     return lerp(_LoogaRvtHeightRange.x, _LoogaRvtHeightRange.y, normalizedHeight);
@@ -66,7 +66,14 @@ float2 LoogaRvtGetAtlasUv(float2 worldPositionXZ, int level)
     float4 clipmap = _LoogaRvtCenterExtents[level];
     float4 atlasRect = _LoogaRvtAtlasRects[level];
     float2 localUv = (worldPositionXZ - clipmap.xy) / (clipmap.z * 2.0) + 0.5;
-    return atlasRect.xy + saturate(localUv) * atlasRect.zw;
+    float inset = clipmap.w / (clipmap.z * 4.0);
+    return atlasRect.xy + clamp(localUv, inset, 1.0 - inset) * atlasRect.zw;
+}
+
+half LoogaRvtSurfaceBlendWeight(LoogaRuntimeVirtualTextureSample sample, float worldHeight, float blendDistance)
+{
+    float distanceWeight = saturate(1.0 - abs(worldHeight - sample.height) / max(blendDistance, 0.0001));
+    return sample.coverage * sample.mask * distanceWeight;
 }
 
 LoogaRuntimeVirtualTextureSample LoogaRvtSampleLevel(float3 positionWS, int level)
@@ -88,7 +95,7 @@ LoogaRuntimeVirtualTextureSample LoogaRvtSampleLevel(float3 positionWS, int leve
         sampler_LoogaRvtNormalAtlas,
         atlasUv,
         0.0);
-    half4 heightMask = SAMPLE_TEXTURE2D_LOD(
+    float4 heightMask = SAMPLE_TEXTURE2D_LOD(
         _LoogaRvtHeightAtlas,
         sampler_LoogaRvtHeightAtlas,
         atlasUv,

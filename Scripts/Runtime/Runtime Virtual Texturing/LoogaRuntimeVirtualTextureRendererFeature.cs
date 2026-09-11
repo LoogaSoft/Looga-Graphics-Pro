@@ -49,12 +49,34 @@ namespace LoogaSoft.Rendering.VirtualTexturing
         [Tooltip("Capture only opaque geometry. Transparent surfaces can read the cache but do not write to it.")]
         public bool includeAlphaTestedGeometry = true;
 
+        [Tooltip("Assign terrain clipmap writers exported from matching native surface producers.")]
+        public Material[] terrainWriters = System.Array.Empty<Material>();
         [HideInInspector] public Shader writerShader;
+        [HideInInspector] public Shader clearShader;
 
         private LoogaRuntimeVirtualTexturePass _pass;
-        private readonly Dictionary<Camera, Matrix4x4> _savedCullingMatrices = new();
-        private bool _cullingCallbacksRegistered;
+        private bool _callbacksRegistered;
         private static uint _refreshVersion;
+        private static event System.Action<Bounds> RegionChanged;
+        private static event System.Action<Renderer> WriterChanged;
+        private static event System.Action DiscoveryChanged;
+
+        /// <summary>Requests updates only where these world bounds intersect a camera cache.</summary>
+        public static void RequestRefresh(Bounds bounds)
+        {
+            RegionChanged?.Invoke(bounds);
+        }
+
+        /// <summary>Updates a writer's spatial entry and refreshes its previous and current bounds.</summary>
+        public static void NotifyWriterChanged(Renderer renderer, Bounds previousBounds)
+        {
+            WriterChanged?.Invoke(renderer);
+            RequestRefresh(previousBounds);
+            if (renderer)
+            {
+                RequestRefresh(renderer.bounds);
+            }
+        }
 
         /// <summary>
         /// Requests one cache rebuild for every camera during its next render.
@@ -62,6 +84,7 @@ namespace LoogaSoft.Rendering.VirtualTexturing
         public static void RequestRefresh()
         {
             _refreshVersion++;
+            DiscoveryChanged?.Invoke();
         }
 
 #if UNITY_EDITOR
@@ -88,9 +111,13 @@ namespace LoogaSoft.Rendering.VirtualTexturing
             if (writerShader == null)
                 writerShader = Shader.Find(WriterShaderName);
 
+            if (!clearShader)
+            {
+                clearShader = Shader.Find("Hidden/LoogaSoft/Runtime Virtual Texture/Clear");
+            }
             _pass ??= new LoogaRuntimeVirtualTexturePass();
             _pass.renderPassEvent = RenderPassEvent.BeforeRenderingPrePasses;
-            RegisterCullingCallbacks();
+            RegisterCallbacks();
             Shader.SetGlobalInteger(LoogaRuntimeVirtualTextureShaderIds.Enabled, 0);
         }
 
@@ -108,8 +135,9 @@ namespace LoogaSoft.Rendering.VirtualTexturing
 
         protected override void Dispose(bool disposing)
         {
-            UnregisterCullingCallbacks();
+            UnregisterCallbacks();
             Shader.SetGlobalInteger(LoogaRuntimeVirtualTextureShaderIds.Enabled, 0);
+            Shader.SetGlobalInteger(LoogaRuntimeVirtualTextureShaderIds.ClipmapCount, 0);
             Shader.SetGlobalTexture(LoogaRuntimeVirtualTextureShaderIds.AlbedoAtlas, Texture2D.blackTexture);
             Shader.SetGlobalTexture(LoogaRuntimeVirtualTextureShaderIds.NormalAtlas, Texture2D.blackTexture);
             Shader.SetGlobalTexture(LoogaRuntimeVirtualTextureShaderIds.HeightAtlas, Texture2D.blackTexture);
@@ -117,76 +145,104 @@ namespace LoogaSoft.Rendering.VirtualTexturing
             _pass = null;
         }
 
-        private void RegisterCullingCallbacks()
+        private void RegisterCallbacks()
         {
-            if (_cullingCallbacksRegistered)
+            if (_callbacksRegistered)
                 return;
 
             RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
-            RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
-            _cullingCallbacksRegistered = true;
+            TerrainCallbacks.heightmapChanged += OnTerrainHeightChanged;
+            TerrainCallbacks.textureChanged += OnTerrainTextureChanged;
+
+            RegionChanged += OnRegionChanged;
+            WriterChanged += OnWriterChanged;
+            DiscoveryChanged += OnDiscoveryChanged;
+            UnityEngine.SceneManagement.SceneManager.sceneLoaded += OnSceneLoaded;
+            UnityEngine.SceneManagement.SceneManager.sceneUnloaded += OnSceneUnloaded;
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.hierarchyChanged += OnHierarchyChanged;
+#endif
+            _callbacksRegistered = true;
         }
 
-        private void UnregisterCullingCallbacks()
+        private void UnregisterCallbacks()
         {
-            if (!_cullingCallbacksRegistered)
+            if (!_callbacksRegistered)
                 return;
 
             RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
-            RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
-            _cullingCallbacksRegistered = false;
+            TerrainCallbacks.heightmapChanged -= OnTerrainHeightChanged;
+            TerrainCallbacks.textureChanged -= OnTerrainTextureChanged;
 
-            foreach (KeyValuePair<Camera, Matrix4x4> entry in _savedCullingMatrices)
+            RegionChanged -= OnRegionChanged;
+            WriterChanged -= OnWriterChanged;
+            DiscoveryChanged -= OnDiscoveryChanged;
+            UnityEngine.SceneManagement.SceneManager.sceneLoaded -= OnSceneLoaded;
+            UnityEngine.SceneManagement.SceneManager.sceneUnloaded -= OnSceneUnloaded;
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.hierarchyChanged -= OnHierarchyChanged;
+#endif
+            _callbacksRegistered = false;
+        }
+
+        private void OnRegionChanged(Bounds bounds) => _pass?.InvalidateRegion(bounds);
+        private void OnWriterChanged(Renderer renderer) => _pass?.UpdateWriter(renderer);
+        private void OnDiscoveryChanged() => _pass?.InvalidateDiscovery();
+        private void OnSceneLoaded(UnityEngine.SceneManagement.Scene scene, UnityEngine.SceneManagement.LoadSceneMode mode) => RequestRefresh();
+        private void OnSceneUnloaded(UnityEngine.SceneManagement.Scene scene) => RequestRefresh();
+#if UNITY_EDITOR
+        private void OnHierarchyChanged() => RequestRefresh();
+#endif
+
+        private void OnTerrainHeightChanged(UnityEngine.Terrain terrain, RectInt region, bool synchronized)
+        {
+            if (isActive && terrain && terrain.terrainData)
             {
-                if (entry.Key != null)
-                    entry.Key.cullingMatrix = entry.Value;
+                RefreshTerrainRegion(terrain, region, terrain.terrainData.heightmapResolution - 1);
             }
+        }
 
-            _savedCullingMatrices.Clear();
+        private void OnTerrainTextureChanged(UnityEngine.Terrain terrain, string textureName, RectInt region, bool synchronized)
+        {
+            if (isActive && terrain && terrain.terrainData)
+            {
+                int resolution = textureName == TerrainData.HolesTextureName
+                    ? terrain.terrainData.holesResolution : terrain.terrainData.alphamapResolution;
+                RefreshTerrainRegion(terrain, region, resolution);
+            }
+        }
+
+        private void RefreshTerrainRegion(UnityEngine.Terrain terrain, RectInt region, int resolution)
+        {
+            Vector3 size = terrain.terrainData.size;
+            Vector3 origin = terrain.transform.position;
+            Vector3 minimum = origin + new Vector3((region.xMin - 2f) / resolution * size.x, 0,
+                (region.yMin - 2f) / resolution * size.z);
+            Vector3 maximum = origin + new Vector3((region.xMax + 2f) / resolution * size.x, size.y,
+                (region.yMax + 2f) / resolution * size.z);
+            _pass?.InvalidateRegion(new Bounds((minimum + maximum) * 0.5f, maximum - minimum));
         }
 
         private void OnBeginCameraRendering(ScriptableRenderContext context, Camera camera)
         {
-            if (!isActive || writerShader == null || !ShouldRenderCamera(camera))
-                return;
-
-            if (_savedCullingMatrices.ContainsKey(camera))
-                return;
-
-            _savedCullingMatrices.Add(camera, camera.cullingMatrix);
-            camera.cullingMatrix = BuildCaptureCullingMatrix(camera.transform.position);
+            Shader.SetGlobalInteger(LoogaRuntimeVirtualTextureShaderIds.Enabled, 0);
         }
 
-        private void OnEndCameraRendering(ScriptableRenderContext context, Camera camera)
+        /// <summary>Reports rebuild count and the latest mesh collection and bounds-filter cost for a camera.</summary>
+        public bool TryGetStatistics(Camera camera, out int captures, out double cullMilliseconds)
         {
-            if (!_savedCullingMatrices.Remove(camera, out Matrix4x4 cullingMatrix))
-                return;
-
-            camera.cullingMatrix = cullingMatrix;
+            captures = 0;
+            cullMilliseconds = 0;
+            return _pass != null && _pass.TryGetStatistics(camera, out captures, out cullMilliseconds);
         }
 
-        private Matrix4x4 BuildCaptureCullingMatrix(Vector3 cameraPosition)
+        /// <summary>Gets the latest update area and spatial-index workload for a camera.</summary>
+        public bool TryGetUpdateStatistics(Camera camera, out int updatedTexels, out int copiedTexels,
+            out int discoveries, out int candidates)
         {
-            int level = Mathf.Clamp(clipmapCount, 1, LoogaRuntimeVirtualTextureMath.MaximumClipmapCount) - 1;
-            float extent = LoogaRuntimeVirtualTextureMath.GetExtent(firstClipmapExtent, level);
-            Vector2 center = LoogaRuntimeVirtualTextureMath.SnapCenter(
-                cameraPosition,
-                extent,
-                pagesPerClipmapAxis);
-            float nearPlane = Mathf.Max(0.01f, capturePadding);
-            float maximumHeight = Mathf.Max(minimumWorldHeight + 1f, maximumWorldHeight);
-            float farPlane = maximumHeight - minimumWorldHeight + nearPlane * 2f;
-            Vector3 capturePosition = new(center.x, maximumHeight + nearPlane, center.y);
-            Quaternion captureRotation = Quaternion.LookRotation(Vector3.down, Vector3.forward);
-            Matrix4x4 view = Matrix4x4.TRS(capturePosition, captureRotation, Vector3.one).inverse;
-            Matrix4x4 projection = Matrix4x4.Ortho(
-                -extent * 0.5f,
-                extent * 0.5f,
-                -extent * 0.5f,
-                extent * 0.5f,
-                nearPlane,
-                farPlane);
-            return projection * view;
+            updatedTexels = copiedTexels = discoveries = candidates = 0;
+            return _pass != null && _pass.TryGetUpdateStatistics(camera, out updatedTexels, out copiedTexels,
+                out discoveries, out candidates);
         }
 
         private bool ShouldRenderCamera(Camera camera)
@@ -202,37 +258,63 @@ namespace LoogaSoft.Rendering.VirtualTexturing
 
         private sealed class LoogaRuntimeVirtualTexturePass : ScriptableRenderPass
         {
-            private static readonly ShaderTagId[] ShaderTags =
-            {
-                new("UniversalGBuffer"),
-                new("UniversalForward"),
-                new("UniversalForwardOnly"),
-                new("SRPDefaultUnlit"),
-                new("LightweightForward")
-            };
-
             private readonly ProfilingSampler _profilingSampler = new("Looga Runtime Virtual Texture");
-            private readonly List<ShaderTagId> _shaderTags = new(ShaderTags);
+
             private readonly Vector4[] _centerExtents = new Vector4[LoogaRuntimeVirtualTextureMath.MaximumClipmapCount];
             private readonly Vector4[] _atlasRects = new Vector4[LoogaRuntimeVirtualTextureMath.MaximumClipmapCount];
             private readonly Matrix4x4[] _viewMatrices = new Matrix4x4[LoogaRuntimeVirtualTextureMath.MaximumClipmapCount];
             private readonly Matrix4x4[] _projectionMatrices = new Matrix4x4[LoogaRuntimeVirtualTextureMath.MaximumClipmapCount];
             private readonly Dictionary<int, CameraResources> _cameraResources = new();
+            private readonly List<int> _expiredCameras = new();
 
             private LoogaRuntimeVirtualTextureRendererFeature _settings;
+            private readonly LoogaRuntimeVirtualTextureTerrainCapture _terrainCapture = new();
+            private readonly LoogaRuntimeVirtualTextureMeshCapture _meshCapture = new();
             private Shader _writerShader;
             private Camera _camera;
+            private Material _clearMaterial;
+            private readonly Vector2[] _previousCenters = new Vector2[4];
+            private readonly List<UpdateRegion> _updates = new();
+            private readonly List<Bounds> _updateBounds = new();
+            private readonly List<ShiftRegion> _shifts = new();
+
+            private struct UpdateRegion
+            {
+                public int Level;
+                public RectInt Pixels;
+            }
+
+            private struct ShiftRegion
+            {
+                public RectInt Source;
+                public Vector2Int Destination;
+            }
+
+            private sealed class ShiftData
+            {
+                public RenderTexture[] Atlases;
+                public RenderTexture Scratch;
+                public ShiftRegion[] Shifts;
+            }
 
             private sealed class CameraResources
             {
+                public Camera Owner;
                 public readonly Vector2[] Centers = new Vector2[LoogaRuntimeVirtualTextureMath.MaximumClipmapCount];
                 public RTHandle AlbedoAtlas;
                 public RTHandle NormalAtlas;
                 public RTHandle HeightAtlas;
                 public RTHandle DepthAtlas;
+                public RTHandle Scratch;
+                public readonly List<Bounds> DirtyRegions = new();
+                public bool FullDirty;
+                public int UpdatedTexels;
+                public int CopiedTexels;
                 public bool HasValidCenters;
                 public int ConfigurationHash;
                 public uint RefreshVersion;
+                public int CaptureCount;
+                public double LastCullMilliseconds;
 
                 public void Release()
                 {
@@ -240,6 +322,8 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                     NormalAtlas?.Release();
                     HeightAtlas?.Release();
                     DepthAtlas?.Release();
+                    Scratch?.Release();
+                    Scratch = null;
                     AlbedoAtlas = null;
                     NormalAtlas = null;
                     HeightAtlas = null;
@@ -252,10 +336,6 @@ namespace LoogaSoft.Rendering.VirtualTexturing
 
             private sealed class PassData
             {
-                public RendererListHandle RendererList0;
-                public RendererListHandle RendererList1;
-                public RendererListHandle RendererList2;
-                public RendererListHandle RendererList3;
                 public int ClipmapCount;
                 public int TileResolution;
                 public float MinimumHeight;
@@ -268,18 +348,11 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                 public Matrix4x4 CameraView;
                 public Matrix4x4 CameraProjection;
                 public bool RebuildCache;
+                public UpdateRegion[] Updates;
+                public Material ClearMaterial;
+                public LoogaRuntimeVirtualTextureTerrainCapture.Draw[] Terrains;
 
-                public RendererListHandle GetRendererList(int index)
-                {
-                    return index switch
-                    {
-                        0 => RendererList0,
-                        1 => RendererList1,
-                        2 => RendererList2,
-                        3 => RendererList3,
-                        _ => default
-                    };
-                }
+                public LoogaRuntimeVirtualTextureMeshCapture.Draw[] Meshes;
             }
 
             public void Dispose()
@@ -288,6 +361,28 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                     resources.Release();
 
                 _cameraResources.Clear();
+                _terrainCapture.Dispose();
+                _meshCapture.Dispose();
+                CoreUtils.Destroy(_clearMaterial);
+            }
+
+            public void InvalidateDiscovery() => _meshCapture.InvalidateDiscovery();
+            public void UpdateWriter(Renderer renderer) => _meshCapture.UpdateRenderer(renderer);
+
+            public void InvalidateRegion(Bounds bounds)
+            {
+                foreach (CameraResources resources in _cameraResources.Values)
+                {
+                    if (resources.DirtyRegions.Count >= 32)
+                    {
+                        resources.FullDirty = true;
+                        resources.DirtyRegions.Clear();
+                    }
+                    else if (!resources.FullDirty)
+                    {
+                        resources.DirtyRegions.Add(bounds);
+                    }
+                }
             }
 
             public void Setup(
@@ -298,16 +393,18 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                 _settings = settings;
                 _writerShader = writerShader;
                 _camera = camera;
+                if (!_clearMaterial && settings.clearShader)
+                {
+                    _clearMaterial = CoreUtils.CreateEngineMaterial(settings.clearShader);
+                }
             }
 
             public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
             {
-                if (_settings == null || _writerShader == null || _camera == null)
+                if (_settings == null || _writerShader == null || _camera == null || !_clearMaterial)
                     return;
 
-                UniversalRenderingData renderingData = frameData.Get<UniversalRenderingData>();
                 UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
-                UniversalLightData lightData = frameData.Get<UniversalLightData>();
 
                 int clipmapCount = Mathf.Clamp(
                     _settings.clipmapCount,
@@ -330,7 +427,8 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                 Shader.SetGlobalTexture(
                     LoogaRuntimeVirtualTextureShaderIds.HeightAtlas,
                     resources.HeightAtlas);
-                bool centerChanged = BuildClipmaps(
+                System.Array.Copy(resources.Centers, _previousCenters, 4);
+                BuildClipmaps(
                     cameraData,
                     clipmapCount,
                     tileResolution,
@@ -340,59 +438,63 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                 int configurationHash = GetConfigurationHash(clipmapCount, atlasResolution);
                 bool configurationChanged = resources.ConfigurationHash != configurationHash;
                 bool refreshRequested = resources.RefreshVersion != _refreshVersion;
-                bool rebuildCache =
-                    _settings.updateMode == CacheUpdateMode.EveryFrame ||
-                    resourcesChanged ||
-                    centerChanged ||
-                    configurationChanged ||
-                    refreshRequested ||
-                    !resources.HasValidCenters;
-                resources.HasValidCenters = true;
-                resources.ConfigurationHash = configurationHash;
-                resources.RefreshVersion = _refreshVersion;
-
-                RendererListHandle rendererList0 = default;
-                RendererListHandle rendererList1 = default;
-                RendererListHandle rendererList2 = default;
-                RendererListHandle rendererList3 = default;
-
+                bool fullUpdate = _settings.updateMode == CacheUpdateMode.EveryFrame || resourcesChanged
+                    || configurationChanged || refreshRequested || !resources.HasValidCenters || resources.FullDirty;
+                BuildUpdates(resources, clipmapCount, tileResolution, fullUpdate);
+                bool rebuildCache = _updates.Count > 0;
                 if (rebuildCache)
                 {
-                    rendererList0 = CreateRendererList(
-                        renderGraph,
-                        renderingData,
-                        cameraData,
-                        lightData);
-                    if (clipmapCount > 1)
-                        rendererList1 = CreateRendererList(renderGraph, renderingData, cameraData, lightData);
-                    if (clipmapCount > 2)
-                        rendererList2 = CreateRendererList(renderGraph, renderingData, cameraData, lightData);
-                    if (clipmapCount > 3)
-                        rendererList3 = CreateRendererList(renderGraph, renderingData, cameraData, lightData);
-
-                    if (!rendererList0.IsValid() ||
-                        clipmapCount > 1 && !rendererList1.IsValid() ||
-                        clipmapCount > 2 && !rendererList2.IsValid() ||
-                        clipmapCount > 3 && !rendererList3.IsValid())
+                    var timer = System.Diagnostics.Stopwatch.StartNew();
+                    _updateBounds.Clear();
+                    foreach (UpdateRegion update in _updates)
                     {
-                        return;
+                        _updateBounds.Add(UpdateBounds(update, _centerExtents[update.Level], tileResolution,
+                            minimumHeight, maximumHeight));
                     }
+                    _meshCapture.Prepare(_writerShader, _settings.writerLayerMask.value & _camera.cullingMask,
+                        _centerExtents[clipmapCount - 1], minimumHeight, maximumHeight,
+                        _settings.includeAlphaTestedGeometry, _camera.scene, _updateBounds);
+                    resources.LastCullMilliseconds = timer.Elapsed.TotalMilliseconds;
+                    resources.CaptureCount++;
                 }
-
                 TextureHandle albedoAtlas = renderGraph.ImportTexture(resources.AlbedoAtlas);
                 TextureHandle normalAtlas = renderGraph.ImportTexture(resources.NormalAtlas);
                 TextureHandle heightAtlas = renderGraph.ImportTexture(resources.HeightAtlas);
                 TextureHandle depthAtlas = renderGraph.ImportTexture(resources.DepthAtlas);
+                if (_shifts.Count > 0)
+                {
+                    TextureHandle scratch = renderGraph.ImportTexture(resources.Scratch);
+                    using var shiftBuilder = renderGraph.AddUnsafePass<ShiftData>("Looga RVT scroll", out var shiftData);
+                    shiftData.Atlases = new[] { resources.AlbedoAtlas.rt, resources.NormalAtlas.rt, resources.HeightAtlas.rt };
+                    shiftData.Scratch = resources.Scratch.rt;
+                    shiftData.Shifts = _shifts.ToArray();
+                    shiftBuilder.UseTexture(albedoAtlas, AccessFlags.ReadWrite);
+                    shiftBuilder.UseTexture(normalAtlas, AccessFlags.ReadWrite);
+                    shiftBuilder.UseTexture(heightAtlas, AccessFlags.ReadWrite);
+                    shiftBuilder.UseTexture(scratch, AccessFlags.ReadWrite);
+                    shiftBuilder.AllowPassCulling(false);
+                    shiftBuilder.SetRenderFunc(static (ShiftData data, UnsafeGraphContext context) =>
+                    {
+                        var command = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
+                        foreach (ShiftRegion shift in data.Shifts)
+                        {
+                            foreach (RenderTexture atlas in data.Atlases)
+                            {
+                                RectInt source = shift.Source;
+                                command.CopyTexture(atlas, 0, 0, source.x, source.y, source.width, source.height,
+                                    data.Scratch, 0, 0, 0, 0);
+                                command.CopyTexture(data.Scratch, 0, 0, 0, 0, source.width, source.height,
+                                    atlas, 0, 0, shift.Destination.x, shift.Destination.y);
+                            }
+                        }
+                    });
+                }
 
                 using IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass(
                     "Looga Runtime Virtual Texture",
                     out PassData passData,
                     _profilingSampler);
 
-                passData.RendererList0 = rendererList0;
-                passData.RendererList1 = rendererList1;
-                passData.RendererList2 = rendererList2;
-                passData.RendererList3 = rendererList3;
                 passData.ClipmapCount = clipmapCount;
                 passData.TileResolution = tileResolution;
                 passData.MinimumHeight = minimumHeight;
@@ -403,22 +505,29 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                 passData.ViewMatrices = _viewMatrices;
                 passData.ProjectionMatrices = _projectionMatrices;
                 passData.CameraView = cameraData.GetViewMatrix();
+                // SetViewProjectionMatrices applies the graphics API conversion.
                 passData.CameraProjection = cameraData.GetProjectionMatrix();
                 passData.RebuildCache = rebuildCache;
+                passData.Updates = _updates.ToArray();
+                passData.ClearMaterial = _clearMaterial;
+                if (rebuildCache)
+                {
+                    _terrainCapture.Prepare(_settings.terrainWriters ?? System.Array.Empty<Material>(),
+                        _settings.writerLayerMask.value & _camera.cullingMask, _centerExtents[clipmapCount - 1], _camera.scene);
+                    passData.Terrains = _terrainCapture.Draws.ToArray();
+                    passData.Meshes = _meshCapture.Draws.ToArray();
+                }
+                resources.HasValidCenters = true;
+                resources.ConfigurationHash = configurationHash;
+                resources.RefreshVersion = _refreshVersion;
+                resources.DirtyRegions.Clear();
+                resources.FullDirty = false;
 
                 if (rebuildCache)
                 {
-                    builder.UseRendererList(rendererList0);
-                    if (clipmapCount > 1)
-                        builder.UseRendererList(rendererList1);
-                    if (clipmapCount > 2)
-                        builder.UseRendererList(rendererList2);
-                    if (clipmapCount > 3)
-                        builder.UseRendererList(rendererList3);
-
-                    builder.SetRenderAttachment(albedoAtlas, 0, AccessFlags.Write);
-                    builder.SetRenderAttachment(normalAtlas, 1, AccessFlags.Write);
-                    builder.SetRenderAttachment(heightAtlas, 2, AccessFlags.Write);
+                    builder.SetRenderAttachment(albedoAtlas, 0, AccessFlags.ReadWrite);
+                    builder.SetRenderAttachment(normalAtlas, 1, AccessFlags.ReadWrite);
+                    builder.SetRenderAttachment(heightAtlas, 2, AccessFlags.ReadWrite);
                     builder.SetRenderAttachmentDepth(depthAtlas, AccessFlags.Write);
                 }
                 else
@@ -445,15 +554,11 @@ namespace LoogaSoft.Rendering.VirtualTexturing
 
                     if (data.RebuildCache)
                     {
-                        float clearDepth = SystemInfo.usesReversedZBuffer ? 0f : 1f;
-                        context.cmd.ClearRenderTarget(
-                            RTClearFlags.All,
-                            Color.clear,
-                            clearDepth,
-                            0);
-
-                        for (int level = 0; level < data.ClipmapCount; level++)
+                        // Depth is temporary. Only the surface atlases retain data between captures.
+                        context.cmd.ClearRenderTarget(RTClearFlags.Depth, Color.clear, 1f, 0);
+                        foreach (UpdateRegion update in data.Updates)
                         {
+                            int level = update.Level;
                             int tileX = level & 1;
                             int tileY = level >> 1;
                             context.cmd.SetViewport(new Rect(
@@ -461,13 +566,42 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                                 tileY * data.TileResolution,
                                 data.TileResolution,
                                 data.TileResolution));
+                            context.cmd.EnableScissorRect(new Rect(tileX * data.TileResolution + update.Pixels.x,
+                                tileY * data.TileResolution + update.Pixels.y, update.Pixels.width, update.Pixels.height));
+                            context.cmd.DrawProcedural(Matrix4x4.identity, data.ClearMaterial, 0, MeshTopology.Triangles, 3);
                             context.cmd.SetViewProjectionMatrices(
                                 data.ViewMatrices[level],
                                 data.ProjectionMatrices[level]);
-                            context.cmd.DrawRendererList(data.GetRendererList(level));
+                            Bounds updateBounds = UpdateBounds(update, data.CenterExtents[level], data.TileResolution,
+                                data.MinimumHeight, data.MaximumHeight);
+                            foreach (LoogaRuntimeVirtualTextureMeshCapture.Draw mesh in data.Meshes)
+                            {
+                                if (!mesh.Bounds.Intersects(updateBounds))
+                                {
+                                    continue;
+                                }
+                                context.cmd.DrawRenderer(mesh.Renderer, mesh.Material, mesh.Submesh, 0);
+                            }
+                            Vector4 region = data.CenterExtents[level];
+                            foreach (LoogaRuntimeVirtualTextureTerrainCapture.Draw terrain in data.Terrains)
+                            {
+                                if (terrain.Origin.x > updateBounds.max.x || terrain.Origin.z > updateBounds.max.z
+                                    || terrain.Origin.x + terrain.Size.x < updateBounds.min.x
+                                    || terrain.Origin.z + terrain.Size.z < updateBounds.min.z)
+                                {
+                                    continue;
+                                }
+                                terrain.Properties.SetVector("_LoogaVTPageRect", new Vector4(
+                                    (region.x - region.z - terrain.Origin.x) / terrain.Size.x,
+                                    (region.y - region.z - terrain.Origin.z) / terrain.Size.z,
+                                    region.z * 2f / terrain.Size.x, region.z * 2f / terrain.Size.z));
+                                context.cmd.DrawProcedural(Matrix4x4.identity, terrain.Material, 0,
+                                    MeshTopology.Triangles, 3, 1, terrain.Properties);
+                            }
                         }
                     }
 
+                    context.cmd.DisableScissorRect();
                     context.cmd.SetViewProjectionMatrices(
                         data.CameraView,
                         data.CameraProjection);
@@ -484,6 +618,86 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                         LoogaRuntimeVirtualTextureShaderIds.Enabled,
                         1);
                 });
+            }
+
+            private static Bounds UpdateBounds(UpdateRegion update, Vector4 region, int resolution,
+                float minimumHeight, float maximumHeight)
+            {
+                float texel = region.z * 2f / resolution;
+                // Include a texel at each edge for raster coverage.
+                Vector3 minimum = new(region.x - region.z + (update.Pixels.xMin - 1) * texel,
+                    minimumHeight, region.y - region.z + (update.Pixels.yMin - 1) * texel);
+                Vector3 maximum = new(region.x - region.z + (update.Pixels.xMax + 1) * texel,
+                    maximumHeight, region.y - region.z + (update.Pixels.yMax + 1) * texel);
+                return new Bounds((minimum + maximum) * 0.5f, maximum - minimum);
+            }
+
+            private void BuildUpdates(CameraResources resources, int count, int resolution, bool full)
+            {
+                _updates.Clear();
+                _shifts.Clear();
+                resources.UpdatedTexels = 0;
+                resources.CopiedTexels = 0;
+                for (int level = 0; level < count; level++)
+                {
+                    Vector4 region = _centerExtents[level];
+                    Vector2 delta = (resources.Centers[level] - _previousCenters[level]) / region.w;
+                    int dx = Mathf.RoundToInt(delta.x);
+                    int dy = Mathf.RoundToInt(delta.y);
+                    if (full || Mathf.Abs(dx) >= resolution || Mathf.Abs(dy) >= resolution)
+                    {
+                        AddUpdate(resources, level, new RectInt(0, 0, resolution, resolution));
+                        continue;
+                    }
+                    if (dx != 0 || dy != 0)
+                    {
+                        int originX = (level & 1) * resolution;
+                        int originY = (level >> 1) * resolution;
+                        var source = new RectInt(originX + Mathf.Max(0, dx), originY + Mathf.Max(0, dy),
+                            resolution - Mathf.Abs(dx), resolution - Mathf.Abs(dy));
+                        _shifts.Add(new ShiftRegion { Source = source,
+                            Destination = new Vector2Int(originX + Mathf.Max(0, -dx), originY + Mathf.Max(0, -dy)) });
+                        resources.CopiedTexels += source.width * source.height;
+                        if (dx != 0)
+                        {
+                            AddUpdate(resources, level, new RectInt(dx > 0 ? resolution - dx : 0, 0, Mathf.Abs(dx), resolution));
+                        }
+                        if (dy != 0)
+                        {
+                            AddUpdate(resources, level, new RectInt(0, dy > 0 ? resolution - dy : 0, resolution, Mathf.Abs(dy)));
+                        }
+                    }
+                    RectInt dirty = default;
+                    bool any = false;
+                    foreach (Bounds bounds in resources.DirtyRegions)
+                    {
+                        int x0 = Mathf.Clamp(Mathf.FloorToInt((bounds.min.x - region.x + region.z) / region.w) - 1, 0, resolution);
+                        int y0 = Mathf.Clamp(Mathf.FloorToInt((bounds.min.z - region.y + region.z) / region.w) - 1, 0, resolution);
+                        int x1 = Mathf.Clamp(Mathf.CeilToInt((bounds.max.x - region.x + region.z) / region.w) + 1, 0, resolution);
+                        int y1 = Mathf.Clamp(Mathf.CeilToInt((bounds.max.z - region.y + region.z) / region.w) + 1, 0, resolution);
+                        if (x1 <= x0 || y1 <= y0)
+                        {
+                            continue;
+                        }
+                        if (any)
+                        {
+                            x0 = Mathf.Min(x0, dirty.xMin); y0 = Mathf.Min(y0, dirty.yMin);
+                            x1 = Mathf.Max(x1, dirty.xMax); y1 = Mathf.Max(y1, dirty.yMax);
+                        }
+                        dirty = new RectInt(x0, y0, x1 - x0, y1 - y0);
+                        any = true;
+                    }
+                    if (any)
+                    {
+                        AddUpdate(resources, level, dirty);
+                    }
+                }
+            }
+
+            private void AddUpdate(CameraResources resources, int level, RectInt pixels)
+            {
+                _updates.Add(new UpdateRegion { Level = level, Pixels = pixels });
+                resources.UpdatedTexels += pixels.width * pixels.height;
             }
 
             private bool BuildClipmaps(
@@ -517,15 +731,8 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                         extent / tileResolution);
                     _atlasRects[level] = LoogaRuntimeVirtualTextureMath.GetAtlasRect(level);
 
-                    Vector3 capturePosition = new(
-                        center.x,
-                        maximumHeight + nearPlane,
-                        center.y);
-                    Quaternion captureRotation = Quaternion.LookRotation(Vector3.down, Vector3.forward);
-                    _viewMatrices[level] = Matrix4x4.TRS(
-                        capturePosition,
-                        captureRotation,
-                        Vector3.one).inverse;
+                    _viewMatrices[level] = LoogaRuntimeVirtualTextureMath.GetCaptureView(
+                        center, maximumHeight + nearPlane);
                     Matrix4x4 projection = Matrix4x4.Ortho(
                         -extent * 0.5f,
                         extent * 0.5f,
@@ -533,52 +740,58 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                         extent * 0.5f,
                         nearPlane,
                         farPlane);
-                    _projectionMatrices[level] = GL.GetGPUProjectionMatrix(projection, true);
+                    // Match terrain writer UVs: positive world Z maps to increasing texture Y.
+                    Matrix4x4 gpuProjection = GL.GetGPUProjectionMatrix(projection, false);
+                    _projectionMatrices[level] = LoogaRuntimeVirtualTextureMath.ToForwardDepthProjection(
+                        gpuProjection, SystemInfo.usesReversedZBuffer);
                 }
 
                 return centerChanged;
             }
 
-            private RendererListHandle CreateRendererList(
-                RenderGraph renderGraph,
-                UniversalRenderingData renderingData,
-                UniversalCameraData cameraData,
-                UniversalLightData lightData)
+            public bool TryGetStatistics(Camera camera, out int captures, out double cullMilliseconds)
             {
-                RenderQueueRange queueRange = _settings.includeAlphaTestedGeometry
-                    ? RenderQueueRange.opaque
-                    : new RenderQueueRange
-                    {
-                        lowerBound = (int)RenderQueue.Background,
-                        upperBound = (int)RenderQueue.AlphaTest - 1
-                    };
-                FilteringSettings filteringSettings = new(
-                    queueRange,
-                    _settings.writerLayerMask);
-                DrawingSettings drawingSettings = RenderingUtils.CreateDrawingSettings(
-                    _shaderTags,
-                    renderingData,
-                    cameraData,
-                    lightData,
-                    SortingCriteria.CommonOpaque);
-                drawingSettings.overrideShader = _writerShader;
-                drawingSettings.overrideShaderPassIndex = 0;
-                drawingSettings.enableInstancing = false;
+                captures = 0;
+                cullMilliseconds = 0;
+                if (!camera || !_cameraResources.TryGetValue(camera.GetInstanceID(), out CameraResources resources))
+                    return false;
+                captures = resources.CaptureCount;
+                cullMilliseconds = resources.LastCullMilliseconds;
+                return true;
+            }
 
-                RendererListParams rendererListParams = new(
-                    renderingData.cullResults,
-                    drawingSettings,
-                    filteringSettings);
-                return renderGraph.CreateRendererList(rendererListParams);
+            public bool TryGetUpdateStatistics(Camera camera, out int updatedTexels, out int copiedTexels,
+                out int discoveries, out int candidates)
+            {
+                discoveries = _meshCapture.DiscoveryCount;
+                candidates = _meshCapture.CandidateCount;
+                updatedTexels = copiedTexels = 0;
+                if (!camera || !_cameraResources.TryGetValue(camera.GetInstanceID(), out CameraResources resources)) return false;
+                updatedTexels = resources.UpdatedTexels;
+                copiedTexels = resources.CopiedTexels;
+                return true;
             }
 
             private CameraResources GetCameraResources(Camera camera)
             {
+                _expiredCameras.Clear();
+                foreach (var entry in _cameraResources)
+                {
+                    if (!entry.Value.Owner)
+                    {
+                        _expiredCameras.Add(entry.Key);
+                    }
+                }
+                foreach (int expired in _expiredCameras)
+                {
+                    _cameraResources[expired].Release();
+                    _cameraResources.Remove(expired);
+                }
                 int cameraId = camera.GetInstanceID();
                 if (_cameraResources.TryGetValue(cameraId, out CameraResources resources))
                     return resources;
 
-                resources = new CameraResources();
+                resources = new CameraResources { Owner = camera };
                 _cameraResources.Add(cameraId, resources);
                 return resources;
             }
@@ -596,7 +809,12 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                     hash = hash * 31 + _settings.maximumWorldHeight.GetHashCode();
                     hash = hash * 31 + _settings.capturePadding.GetHashCode();
                     hash = hash * 31 + _settings.writerLayerMask.value;
+                    hash = hash * 31 + _camera.cullingMask;
                     hash = hash * 31 + (_settings.includeAlphaTestedGeometry ? 1 : 0);
+                    foreach (Material writer in _settings.terrainWriters ?? System.Array.Empty<Material>())
+                    {
+                        hash = hash * 31 + (writer ? writer.GetInstanceID() : 0);
+                    }
                     return hash;
                 }
             }
@@ -630,6 +848,10 @@ namespace LoogaSoft.Rendering.VirtualTexturing
                     TextureWrapMode.Clamp,
                     name: "Looga RVT Height Mask");
 
+                RenderTextureDescriptor scratchDescriptor = colorDescriptor;
+                scratchDescriptor.width = scratchDescriptor.height = resolution / 2;
+                changed |= RenderingUtils.ReAllocateHandleIfNeeded(ref resources.Scratch, scratchDescriptor,
+                    FilterMode.Point, TextureWrapMode.Clamp, name: "Looga RVT scroll scratch");
                 RenderTextureDescriptor depthDescriptor = colorDescriptor;
                 depthDescriptor.graphicsFormat = GraphicsFormat.None;
                 depthDescriptor.depthStencilFormat = GraphicsFormat.D32_SFloat;

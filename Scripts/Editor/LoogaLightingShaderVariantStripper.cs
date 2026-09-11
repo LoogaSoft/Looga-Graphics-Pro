@@ -51,6 +51,12 @@ namespace LoogaSoft.Lighting.Editor
                 return;
 
             VisitedVariants += data.Count;
+            // Generated shaders encode this profile with fixed defines as well as keywords.
+            if (shader.name.StartsWith(GeneratedMasterShaderPrefix, System.StringComparison.Ordinal))
+            {
+                RetainedVariants += data.Count;
+                return;
+            }
             for (int i = data.Count - 1; i >= 0; i--)
             {
                 if (!IsAllowed(shader, data[i], profile))
