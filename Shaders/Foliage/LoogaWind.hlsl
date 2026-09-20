@@ -2,9 +2,11 @@
 #define LOOGA_WIND_INCLUDED
 
 float4 _LoogaWindDirectionAndSpeed; 
-float4 _LoogaWindTurbulence;        
+float4 _LoogaWindTurbulence;
+float4 _LoogaPreviousWindDirectionAndSpeed;
+float4 _LoogaPreviousWindTurbulence;
 
-float3 ApplyProceduralWind(float3 positionOS, float3 positionWS, float flutterMask, float windInfluence)
+float3 ApplyProceduralWindAtTime(float3 positionOS, float3 positionWS, float flutterMask, float windInfluence, float clock, float4 directionSpeed, float4 turbulence)
 {
     // Bounded, predictable height weighting. Vertices at or above ~5m of object-space
     // height get full sway; lower vertices get a quadratic falloff so roots stay still.
@@ -14,21 +16,26 @@ float3 ApplyProceduralWind(float3 positionOS, float3 positionWS, float flutterMa
     float bendWeight = saturate(max(0.0, positionOS.y) / heightRef);
     bendWeight = bendWeight * bendWeight;
 
-    float time = _Time.y * _LoogaWindDirectionAndSpeed.w;
+    float time = clock * directionSpeed.w;
     float phase = positionWS.x * 0.1 + positionWS.z * 0.1;
-    float sway = sin(time + phase) * _LoogaWindTurbulence.x;
+    float sway = sin(time + phase) * turbulence.x;
 
     float flutterPhase = positionWS.x * 2.0 + positionWS.y * 2.0 + positionWS.z * 2.0;
-    float flutter = sin(_Time.y * _LoogaWindTurbulence.y + flutterPhase) * _LoogaWindTurbulence.z * flutterMask;
+    float flutter = sin(clock * turbulence.y + flutterPhase) * turbulence.z * flutterMask;
 
     // SafeNormalize tolerates a zero-vector global (returns 0) instead of producing NaN
     // and culling the whole mesh's triangles.
-    float3 windDir = SafeNormalize(_LoogaWindDirectionAndSpeed.xyz);
+    float3 windDir = SafeNormalize(directionSpeed.xyz);
 
     float3 displacement = windDir * (sway + flutter) * bendWeight * windInfluence;
     displacement.y -= (sway * sway) * 0.5 * bendWeight * windInfluence;
 
     return positionOS + displacement;
+}
+
+float3 ApplyProceduralWind(float3 positionOS, float3 positionWS, float flutterMask, float windInfluence)
+{
+    return ApplyProceduralWindAtTime(positionOS, positionWS, flutterMask, windInfluence, _Time.y, _LoogaWindDirectionAndSpeed, _LoogaWindTurbulence);
 }
 
 // Calculates a 0 to 1 rolling wave based on the global wind direction and speed

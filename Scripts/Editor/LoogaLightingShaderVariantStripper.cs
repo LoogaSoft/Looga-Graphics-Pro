@@ -167,6 +167,9 @@ namespace LoogaSoft.Lighting.Editor
             LoogaLightingVariantProfile profile = LoogaLightingVariantProfile.instance;
             LoogaLightingVariantDetectionResult detection = LoogaLightingVariantDetector.Detect();
 
+            // Installing Graphics Pro does not require enabling its deferred lighting feature.
+            if (detection.RendererCount == 0) return;
+
             if (profile.DetectBeforeBuild)
             {
                 if (!detection.IsValid)

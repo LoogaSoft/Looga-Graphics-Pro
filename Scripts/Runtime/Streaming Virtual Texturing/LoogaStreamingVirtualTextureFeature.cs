@@ -75,7 +75,7 @@ namespace LoogaSoft.Rendering.StreamingVirtualTexturing
                     clearBuffer = true, clearColor = Color.clear
                 });
                 var drawing = RenderingUtils.CreateDrawingSettings(new ShaderTagId("LoogaSvtFeedback"), rendering, camera, lights, SortingCriteria.CommonOpaque);
-                drawing.enableInstancing = false;
+                drawing.enableInstancing = true;
                 var filtering = new FilteringSettings(RenderQueueRange.opaque);
                 var list = graph.CreateRendererList(new RendererListParams(rendering.cullResults, drawing, filtering));
                 using var builder = graph.AddUnsafePass<Data>("Looga SVT feedback and readback", out var data);

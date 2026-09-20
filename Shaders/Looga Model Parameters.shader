@@ -14,6 +14,8 @@ Shader "Hidden/LoogaSoft/Model Parameters"
             Cull [_Cull]
 
             HLSLPROGRAM
+            #pragma multi_compile_instancing
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma vertex VertModelParameters
             #pragma fragment FragModelParameters
 
@@ -22,12 +24,14 @@ Shader "Hidden/LoogaSoft/Model Parameters"
 
             struct AttributesModelParameters
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionOS : POSITION;
                 float2 uv : TEXCOORD0;
             };
 
             struct VaryingsModelParameters
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionCS : SV_POSITION;
                 float2 uv : TEXCOORD0;
             };
@@ -40,7 +44,9 @@ Shader "Hidden/LoogaSoft/Model Parameters"
 
             VaryingsModelParameters VertModelParameters(AttributesModelParameters input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 VaryingsModelParameters output = (VaryingsModelParameters)0;
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
                 output.positionCS = TransformObjectToHClip(input.positionOS.xyz);
                 output.uv = input.uv;
                 return output;
@@ -54,6 +60,7 @@ Shader "Hidden/LoogaSoft/Model Parameters"
 
             ModelParameterOutput FragModelParameters(VaryingsModelParameters input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 ModelParameterOutput output;
                 output.materialExtras = 0.0h;
                 output.modelParameters = LOOGA_SAMPLE_MODEL_PARAMETERS(input.uv);

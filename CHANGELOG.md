@@ -1,6 +1,46 @@
 # Changelog
 
-## Unreleased
+## 1.3.9 - 2026-09-19
+
+- Update Looga Instancing for the shared adaptive-quality contract.
+- Retain native-resolution STP, motion, lighting, RVT, SVT, and custom shader behavior.
+- Keep required readback, mip-write, and persistent-atlas operations on explicit RenderGraph passes.
+
+## 1.3.8 - 2026-09-19
+
+- Update Looga Instancing for forest HLODs, mapped uploads, compressed streaming pages, and APV budget coordination.
+- Keep Graphics Pro lighting, RVT, SVT, and custom shader contracts unchanged.
+
+## 1.3.7 - 2026-09-19
+
+- Update Looga Instancing for pooled gameplay proxies and relightable impostors.
+- Keep custom shader, wind, RVT, and SVT contracts compatible with source and impostor LODs.
+
+## 1.3.6 - 2026-09-19
+
+- Update the shared Looga Instancing dependency for hierarchical visibility and super-batching.
+- Keep custom shader, wind, RVT, and SVT contracts unchanged for generated terrain details.
+
+## 1.3.5 - 2026-09-19
+
+- Update the Looga Instancing dependency for camera-scoped shared visibility.
+- Keep Graphics Pro materials and foliage ready for the common visibility service.
+
+## 1.3.4 - 2026-09-19
+
+- Update the shared Looga Instancing dependency for deterministic prototype identities and world-cell metadata.
+- Keep Graphics Pro lighting, RVT, SVT, and shader-profile ownership unchanged; later visibility passes can consume the shared registry without duplicating authored data.
+
+## 1.3.3 - 2026-09-19
+
+- Preserve the stencil attachment while clearing it in the D3D12 native render pass.
+- Allow builds without an active Looga Lighting feature when Graphics Pro is installed only for its other systems.
+
+- Use the shared Looga Instancing dependency without depending on Looga Terrain.
+- Add an SVT instance material profile with owned registry leases and BRG feedback submission.
+- Complete standard instance-ID, depth-normal and motion paths in the custom shader template and SVT material.
+- Initialize custom lighting outputs and bound attenuation-curve indexing to remove first-party shader warnings.
+- Qualify native/BRG surface, normal and motion output across supported lighting and material variants in Forward+ and Deferred+.
 
 - Add optional mesh streaming virtual texturing with offline, independently compressed texture tiles.
 - Add bounded GPU residency, asynchronous reads, visible-pixel feedback, mip fallback, and inspector diagnostics.

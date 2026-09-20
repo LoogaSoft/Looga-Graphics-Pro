@@ -154,6 +154,7 @@ Shader "Looga/Streaming Virtual Texture/Lit"
         float _LoogaSvtFeedbackScale;
         uint ReceiverFeedback(ReceiverVaryings input) : SV_Target
         {
+            UNITY_SETUP_INSTANCE_ID(input);
             float2 uv = input.positionCS.xy / (_ScaledScreenParams.xy * _LoogaSvtFeedbackScale);
             float sceneDepth = LinearEyeDepth(SampleSceneDepth(uv), _ZBufferParams);
             float fragmentDepth = -TransformWorldToView(input.positionWS).z;
@@ -169,6 +170,7 @@ Shader "Looga/Streaming Virtual Texture/Lit"
             Cull [_Cull]
             ZWrite Off ZTest Always
             HLSLPROGRAM
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex ReceiverVertex
             #pragma fragment ReceiverFeedback
@@ -181,6 +183,7 @@ Shader "Looga/Streaming Virtual Texture/Lit"
             Cull [_Cull]
             ZWrite On
             HLSLPROGRAM
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex ReceiverVertex
             #pragma fragment ReceiverFragment
@@ -204,6 +207,7 @@ Shader "Looga/Streaming Virtual Texture/Lit"
             Cull [_Cull]
             ZWrite On
             HLSLPROGRAM
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex ReceiverVertex
             #pragma fragment ReceiverNormals
@@ -219,6 +223,7 @@ Shader "Looga/Streaming Virtual Texture/Lit"
             ZWrite On
             ColorMask R
             HLSLPROGRAM
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex ReceiverVertex
             #pragma fragment ReceiverDepth
@@ -233,6 +238,7 @@ Shader "Looga/Streaming Virtual Texture/Lit"
             ZWrite On
             ColorMask 0
             HLSLPROGRAM
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex ReceiverShadowVertex
             #pragma fragment ReceiverDepth
@@ -240,5 +246,18 @@ Shader "Looga/Streaming Virtual Texture/Lit"
             #pragma multi_compile_vertex _ _CASTING_PUNCTUAL_LIGHT_SHADOW
             ENDHLSL
         }
+        Pass
+        {
+            Name "MotionVectors"
+            Tags { "LightMode"="MotionVectors" }
+            Cull [_Cull]
+            ColorMask RG
+            HLSLPROGRAM
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/SurfaceInput.hlsl"
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/ObjectMotionVectors.hlsl"
+            ENDHLSL
+        }
+
     }
 }

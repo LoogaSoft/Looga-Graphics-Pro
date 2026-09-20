@@ -36,6 +36,7 @@ Shader "LoogaSoft/Bark"
         [Enum(Metallic Alpha, 0, Albedo Alpha, 1)] _SmoothnessTextureChannel ("Smoothness Source", Float) = 0.0
         _BaseSmoothnessScale ("Smoothness", Range(0, 1)) = 0.5
 
+        _LoogaDeformationLimit ("Maximum local deformation", Float) = 2
         _WindInfluence ("Wind Influence", Range(0.0, 1.0)) = 1.0
 
         _OrenNayarSigma ("Oren-Nayar Sigma", Range(0, 90)) = 30.0
@@ -63,7 +64,13 @@ Shader "LoogaSoft/Bark"
 
     SubShader
     {
-        Tags { "RenderType" = "Opaque" "RenderPipeline" = "UniversalPipeline" "UniversalMaterialType" = "Lit" "Queue" = "Geometry" }
+        Tags { "RenderType" = "Opaque" "RenderPipeline" = "UniversalPipeline" "UniversalMaterialType" = "Lit" "AlwaysRenderMotionVectors"="true" "LoogaInstanceDisplacement"="_LoogaDeformationLimit" "Queue" = "Geometry" }
+
+        HLSLINCLUDE
+        #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
+        #define LOOGA_BARK_GEOMETRY 1
+        #include "LoogaBarkInput.hlsl"
+        ENDHLSL
 
         // =========================================================
         // 1. GBUFFER PASS
@@ -82,6 +89,8 @@ Shader "LoogaSoft/Bark"
             }
 
             HLSLPROGRAM
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
             #pragma target 4.5
             #pragma vertex Vert
             #pragma fragment Frag
@@ -119,6 +128,7 @@ Shader "LoogaSoft/Bark"
 
             struct Attributes
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionOS : POSITION;
                 float3 normalOS : NORMAL;
                 float4 tangentOS : TANGENT;
@@ -129,6 +139,7 @@ Shader "LoogaSoft/Bark"
 
             struct Varyings
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionCS : SV_POSITION;
                 float2 uv : TEXCOORD0;
                 float3 normalWS : TEXCOORD1;
@@ -139,45 +150,20 @@ Shader "LoogaSoft/Bark"
                 float4 probeOcclusion : TEXCOORD6;
             };
 
-            TEXTURE2D(_BaseMap);    SAMPLER(sampler_BaseMap);
-            TEXTURE2D(_BumpMap);  SAMPLER(sampler_BumpMap);
-            TEXTURE2D(_MetallicGlossMap);
-            TEXTURE2D(_SpecGlossMap);
-            TEXTURE2D(_OcclusionMap);
-            TEXTURE2D(_MaskMap);    SAMPLER(sampler_MaskMap);
-            TEXTURE2D(_ThicknessMap);
-            LOOGA_DECLARE_MODEL_PARAMETER_TEXTURES;
 
-            CBUFFER_START(UnityPerMaterial)
-                float4 _BaseColor;
-                float _AlphaClip;
-                float _Cutoff;
-                float _BumpScale;
-                float _BackfaceNormalMode;
-                float4 _SpecColor;
-                float _Metallic;
-                float _OcclusionStrength;
-                float _SmoothnessTextureChannel;
-                float _BaseSmoothnessScale;
-                float _WindInfluence;
-                float4 _SubsurfaceColor;
-                float _AmbientScatterStrength;
-                float _ScatterWidth;
-                float _TransmissionStrength;
-                float _TransmissionShadowSoftness;
-                float _BacklightRimPower;
-                float _BacklightDistortion;
-                LOOGA_MODEL_PARAMETER_CBUFFER_FIELDS;
-            CBUFFER_END
+
+
 
             #define FragmentOutput LoogaGBufferOutput
 
             Varyings Vert(Attributes input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 Varyings output = (Varyings)0;
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
                 float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
 
-                input.positionOS.xyz = ApplyProceduralWind(input.positionOS.xyz, positionWS, 0.0, _WindInfluence);
+                input.positionOS.xyz = LoogaFoliageDeform(input.positionOS.xyz, UNITY_MATRIX_M, UNITY_MATRIX_I_M, false);
                 VertexPositionInputs vertexInput = GetVertexPositionInputs(input.positionOS.xyz);
                 VertexNormalInputs normalInput = GetVertexNormalInputs(input.normalOS, input.tangentOS);
 
@@ -198,6 +184,10 @@ Shader "LoogaSoft/Bark"
 
             FragmentOutput Frag(Varyings input, bool isFrontFace : SV_IsFrontFace)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
+                #if defined(LOD_FADE_CROSSFADE)
+                    LODFadeCrossFade(input.positionCS);
+                #endif
                 FragmentOutput outGBuffer;
 
                 half4 albedo = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv) * _BaseColor;
@@ -283,6 +273,8 @@ Shader "LoogaSoft/Bark"
             Cull [_Cull]
 
             HLSLPROGRAM
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
             #pragma target 4.5
             #pragma vertex VertForward
             #pragma fragment FragForward
@@ -321,6 +313,7 @@ Shader "LoogaSoft/Bark"
 
             struct AttributesForward
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionOS : POSITION;
                 float3 normalOS : NORMAL;
                 float4 tangentOS : TANGENT;
@@ -331,6 +324,7 @@ Shader "LoogaSoft/Bark"
 
             struct VaryingsForward
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionCS : SV_POSITION;
                 float3 positionWS : TEXCOORD0;
                 float2 uv : TEXCOORD1;
@@ -341,42 +335,17 @@ Shader "LoogaSoft/Bark"
                 float4 probeOcclusion : TEXCOORD7;
             };
 
-            TEXTURE2D(_BaseMap);    SAMPLER(sampler_BaseMap);
-            TEXTURE2D(_BumpMap);  SAMPLER(sampler_BumpMap);
-            TEXTURE2D(_MetallicGlossMap);
-            TEXTURE2D(_SpecGlossMap);
-            TEXTURE2D(_OcclusionMap);
-            TEXTURE2D(_MaskMap);    SAMPLER(sampler_MaskMap);
-            TEXTURE2D(_ThicknessMap);
-            LOOGA_DECLARE_MODEL_PARAMETER_TEXTURES;
 
-            CBUFFER_START(UnityPerMaterial)
-                float4 _BaseColor;
-                float _AlphaClip;
-                float _Cutoff;
-                float _BumpScale;
-                float _BackfaceNormalMode;
-                float4 _SpecColor;
-                float _Metallic;
-                float _OcclusionStrength;
-                float _SmoothnessTextureChannel;
-                float _BaseSmoothnessScale;
-                float _WindInfluence;
-                float4 _SubsurfaceColor;
-                float _AmbientScatterStrength;
-                float _ScatterWidth;
-                float _TransmissionStrength;
-                float _TransmissionShadowSoftness;
-                float _BacklightRimPower;
-                float _BacklightDistortion;
-                LOOGA_MODEL_PARAMETER_CBUFFER_FIELDS;
-            CBUFFER_END
+
+
 
             VaryingsForward VertForward(AttributesForward input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 VaryingsForward output = (VaryingsForward)0;
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
                 float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
-                input.positionOS.xyz = ApplyProceduralWind(input.positionOS.xyz, positionWS, 0.0, _WindInfluence);
+                input.positionOS.xyz = LoogaFoliageDeform(input.positionOS.xyz, UNITY_MATRIX_M, UNITY_MATRIX_I_M, false);
 
                 VertexPositionInputs vertexInput = GetVertexPositionInputs(input.positionOS.xyz);
                 VertexNormalInputs normalInput = GetVertexNormalInputs(input.normalOS, input.tangentOS);
@@ -398,6 +367,10 @@ Shader "LoogaSoft/Bark"
 
             half4 FragForward(VaryingsForward input, bool isFrontFace : SV_IsFrontFace) : SV_Target
             {
+                UNITY_SETUP_INSTANCE_ID(input);
+                #if defined(LOD_FADE_CROSSFADE)
+                    LODFadeCrossFade(input.positionCS);
+                #endif
                 half4 albedoSample = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv) * _BaseColor;
                 if (_AlphaClip > 0.5) clip(albedoSample.a - _Cutoff);
                 half3 albedo = albedoSample.rgb;
@@ -506,6 +479,9 @@ Shader "LoogaSoft/Bark"
             Cull [_Cull]
 
             HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
             #pragma vertex VertProfile
             #pragma fragment FragProfile
             #pragma shader_feature_local_fragment _USE_SSSS
@@ -517,29 +493,25 @@ Shader "LoogaSoft/Bark"
 
             struct AttributesProfile
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionOS : POSITION;
             };
 
             struct VaryingsProfile
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionCS : SV_POSITION;
             };
 
-            CBUFFER_START(UnityPerMaterial)
-                float4 _SubsurfaceColor;
-                float _AmbientScatterStrength;
-                float _ScatterWidth;
-                float _TransmissionShadowSoftness;
-                float _BacklightRimPower;
-                float _BacklightDistortion;
-                float _WindInfluence;
-            CBUFFER_END
+
 
             VaryingsProfile VertProfile(AttributesProfile input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 VaryingsProfile output = (VaryingsProfile)0;
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
                 float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
-                input.positionOS.xyz = ApplyProceduralWind(input.positionOS.xyz, positionWS, 0.0, _WindInfluence);
+                input.positionOS.xyz = LoogaFoliageDeform(input.positionOS.xyz, UNITY_MATRIX_M, UNITY_MATRIX_I_M, false);
 
                 output.positionCS = TransformObjectToHClip(input.positionOS.xyz);
                 return output;
@@ -553,6 +525,10 @@ Shader "LoogaSoft/Bark"
 
             ProfileOutput FragProfile(VaryingsProfile input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
+                #if defined(LOD_FADE_CROSSFADE)
+                    LODFadeCrossFade(input.positionCS);
+                #endif
                 #if !defined(_USE_SSSS) && !defined(_USE_BACKLIGHTING)
                     discard;
                 #endif
@@ -578,23 +554,97 @@ Shader "LoogaSoft/Bark"
         Pass
         {
             Name "Meta"
-            Tags { "LightMode" = "Meta" }
+            Tags { "LightMode"="Meta" }
             Cull Off
-
             HLSLPROGRAM
-            #pragma vertex UniversalVertexMeta
-            #pragma fragment UniversalFragmentMetaLit
-            #pragma shader_feature EDITOR_VISUALIZATION
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageMetaVertex
+            #pragma fragment LoogaFoliageMetaFragment
 
-            #include "Packages/com.unity.render-pipelines.universal/Shaders/LitInput.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/Shaders/LitMetaPass.hlsl"
+            #include "LoogaFoliageAuxiliary.hlsl"
             ENDHLSL
         }
+        Pass
+        {
+            Name "ShadowCaster"
+            Tags { "LightMode"="ShadowCaster" }
+            ZWrite On
+            ColorMask 0
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageAuxShadow
+            #pragma fragment LoogaFoliageAuxDepth
+            #pragma multi_compile_vertex _ _CASTING_PUNCTUAL_LIGHT_SHADOW
+            #include "LoogaFoliageAuxiliary.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "DepthOnly"
+            Tags { "LightMode"="DepthOnly" }
+            ZWrite On
+            ColorMask R
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageAuxVertex
+            #pragma fragment LoogaFoliageAuxDepth
 
-        UsePass "Universal Render Pipeline/Lit/SHADOWCASTER"
-        UsePass "Universal Render Pipeline/Lit/DEPTHONLY"
-        UsePass "Universal Render Pipeline/Lit/DEPTHNORMALS"
-        UsePass "Hidden/LoogaSoft/Foliage Model Parameters/Bark Material Extras"
+            #include "LoogaFoliageAuxiliary.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "DepthNormals"
+            Tags { "LightMode"="DepthNormals" }
+            ZWrite On
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageAuxVertex
+            #pragma fragment LoogaFoliageAuxNormal
+            #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
+            #include "LoogaFoliageAuxiliary.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "MotionVectors"
+            Tags { "LightMode"="MotionVectors" }
+            ZWrite On
+            ColorMask RG
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageAuxVertex
+            #pragma fragment LoogaFoliageAuxMotion
+
+            #include "LoogaFoliageAuxiliary.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "MaterialExtras"
+            Tags { "LightMode"="LoogaMaterialExtras" }
+            ZWrite Off
+            ZTest Equal
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageAuxVertex
+            #pragma fragment LoogaFoliageAuxExtras
+
+            #include "LoogaFoliageAuxiliary.hlsl"
+            ENDHLSL
+        }
     }
     CustomEditor "LoogaSoft.Lighting.Editor.LoogaBarkShaderGUI"
     Fallback "Universal Render Pipeline/Lit"

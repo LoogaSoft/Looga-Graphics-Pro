@@ -2,6 +2,7 @@ Shader "LoogaSoft/Grass"
 {
     Properties
     {
+        _RvtGroundParams ("RVT Ground (Color, Normal, Distance, Height Offset)", Vector) = (0,0,1,0)
         [MainTexture] _BaseMap ("Albedo & Alpha", 2D) = "white" {}
         [Enum(Opaque, 0, Transparent, 1)] _Surface ("Surface Type", Float) = 0.0
         _Cull ("Render Face", Float) = 0.0
@@ -40,6 +41,7 @@ Shader "LoogaSoft/Grass"
         _BacklightRimPower ("Backlight Rim Tightness", Range(1.0, 16.0)) = 4.0
         _BacklightDistortion ("Backlight Distortion", Range(0.0, 1.0)) = 0.2
 
+        _LoogaDeformationLimit ("Maximum local deformation", Float) = 2
         _WindInfluence ("Wind Influence", Range(0.0, 1.0)) = 1.0
         _WindTint ("Wind Gust Tint", Color) = (1.2, 1.2, 0.8, 1.0)
         _WindTintStrength ("Wind Tint Strength", Range(0, 1)) = 0.5
@@ -63,8 +65,14 @@ Shader "LoogaSoft/Grass"
 
     SubShader
     {
-        Tags { "RenderType" = "TransparentCutout" "RenderPipeline" = "UniversalPipeline" "UniversalMaterialType" = "Lit" "Queue" = "AlphaTest" }
+        Tags { "RenderType" = "TransparentCutout" "RenderPipeline" = "UniversalPipeline" "UniversalMaterialType" = "Lit" "AlwaysRenderMotionVectors"="true" "LoogaInstanceDisplacement"="_LoogaDeformationLimit" "Queue" = "AlphaTest" }
         Cull [_Cull]
+
+        HLSLINCLUDE
+        #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
+        #define LOOGA_GRASS_GEOMETRY 1
+        #include "LoogaFoliageCore.hlsl"
+        ENDHLSL
 
         // =========================================================
         // 1. GBUFFER PASS
@@ -82,6 +90,9 @@ Shader "LoogaSoft/Grass"
             }
 
             HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
             #pragma target 4.5
             #pragma vertex Vert
             #pragma fragment Frag
@@ -115,15 +126,10 @@ Shader "LoogaSoft/Grass"
 
             FoliageVaryings Vert(FoliageAttributes input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 FoliageVaryings output = (FoliageVaryings)0;
-                float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
-
-                float3 interactionPushWS = ApplyGrassInteraction(positionWS, input.positionOS.xyz, _InteractionBend);
-                float3 interactionPushOS = mul(GetWorldToObjectMatrix(), float4(interactionPushWS, 0.0)).xyz;
-                input.positionOS.xyz += interactionPushOS;
-
-                positionWS = TransformObjectToWorld(input.positionOS.xyz);
-                input.positionOS.xyz = ApplyProceduralWind(input.positionOS.xyz, positionWS, 1.0, _WindInfluence);
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
+                input.positionOS.xyz = LoogaFoliageDeform(input.positionOS.xyz, UNITY_MATRIX_M, UNITY_MATRIX_I_M, false);
                 output.positionWS = TransformObjectToWorld(input.positionOS.xyz);
 
                 output.windGust = CalculateWindGust(output.positionWS);
@@ -150,6 +156,10 @@ Shader "LoogaSoft/Grass"
 
             FragmentOutput Frag(FoliageVaryings input, bool isFrontFace : SV_IsFrontFace)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
+                #if defined(LOD_FADE_CROSSFADE)
+                    LODFadeCrossFade(input.positionCS);
+                #endif
                 FragmentOutput outGBuffer;
 
                 half4 albedo = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv);
@@ -172,6 +182,7 @@ Shader "LoogaSoft/Grass"
                 half3 specularF0 = kDielectricSpec.rgb;
                 half occlusion = 1.0h;
                 half smoothness = _Smoothness;
+                LoogaFoliageGround(input.positionWS, finalAlbedo, normalWS, smoothness, metallic);
                 ApplyLoogaDBuffer(input.positionCS, finalAlbedo, normalWS, metallic, specularF0, occlusion, smoothness);
                 half3 diffuseColor = GetLoogaDiffuseColor(finalAlbedo, metallic, specularF0);
                 half perceptualRoughness = 1.0 - smoothness;
@@ -215,6 +226,9 @@ Shader "LoogaSoft/Grass"
 
             HLSLPROGRAM
             #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma target 4.5
             #pragma vertex VertForward
             #pragma fragment FragForward
             #pragma shader_feature_local_fragment _USE_BACKLIGHTING
@@ -249,15 +263,10 @@ Shader "LoogaSoft/Grass"
 
             FoliageVaryings VertForward(FoliageAttributes input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 FoliageVaryings output = (FoliageVaryings)0;
-                float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
-
-                float3 interactionPushWS = ApplyGrassInteraction(positionWS, input.positionOS.xyz, _InteractionBend);
-                float3 interactionPushOS = mul(GetWorldToObjectMatrix(), float4(interactionPushWS, 0.0)).xyz;
-                input.positionOS.xyz += interactionPushOS;
-
-                positionWS = TransformObjectToWorld(input.positionOS.xyz);
-                input.positionOS.xyz = ApplyProceduralWind(input.positionOS.xyz, positionWS, 1.0, _WindInfluence);
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
+                input.positionOS.xyz = LoogaFoliageDeform(input.positionOS.xyz, UNITY_MATRIX_M, UNITY_MATRIX_I_M, false);
                 output.positionWS = TransformObjectToWorld(input.positionOS.xyz);
 
                 output.windGust = CalculateWindGust(output.positionWS);
@@ -282,6 +291,10 @@ Shader "LoogaSoft/Grass"
 
             half4 FragForward(FoliageVaryings input, bool isFrontFace : SV_IsFrontFace) : SV_Target
             {
+                UNITY_SETUP_INSTANCE_ID(input);
+                #if defined(LOD_FADE_CROSSFADE)
+                    LODFadeCrossFade(input.positionCS);
+                #endif
                 half4 albedoSample = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv);
                 if (_AlphaClip > 0.5) clip(albedoSample.a - _Cutoff);
 
@@ -302,6 +315,7 @@ Shader "LoogaSoft/Grass"
                 half3 f0 = kDielectricSpec.rgb;
                 half occlusion = 1.0h;
                 half smoothness = _Smoothness;
+                LoogaFoliageGround(input.positionWS, finalAlbedo, normalWS, smoothness, metallic);
                 ApplyLoogaDBuffer(input.positionCS, finalAlbedo, normalWS, metallic, f0, occlusion, smoothness);
                 half perceptualRoughness = 1.0 - smoothness;
                 half3 diffuseColor = GetLoogaDiffuseColor(finalAlbedo, metallic, f0);
@@ -359,6 +373,9 @@ Shader "LoogaSoft/Grass"
             Cull [_Cull]
 
             HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
             #pragma vertex VertProfile
             #pragma fragment FragProfile
             #pragma shader_feature_local_fragment _USE_SSSS
@@ -368,9 +385,10 @@ Shader "LoogaSoft/Grass"
 
             VaryingsProfile VertProfile(AttributesProfile input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 VaryingsProfile output = (VaryingsProfile)0;
-                float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
-                input.positionOS.xyz = ApplyProceduralWind(input.positionOS.xyz, positionWS, 1.0, _WindInfluence);
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
+                input.positionOS.xyz = LoogaFoliageDeform(input.positionOS.xyz, UNITY_MATRIX_M, UNITY_MATRIX_I_M, false);
                 output.positionWS = TransformObjectToWorld(input.positionOS.xyz);
                 output.positionCS = TransformObjectToHClip(input.positionOS.xyz);
                 output.uv = input.uv;
@@ -385,6 +403,10 @@ Shader "LoogaSoft/Grass"
 
             ProfileOutput FragProfile(VaryingsProfile input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
+                #if defined(LOD_FADE_CROSSFADE)
+                    LODFadeCrossFade(input.positionCS);
+                #endif
                 #if !defined(_USE_SSSS) && !defined(_USE_BACKLIGHTING)
                     discard;
                 #endif
@@ -414,24 +436,97 @@ Shader "LoogaSoft/Grass"
         Pass
         {
             Name "Meta"
-            Tags { "LightMode" = "Meta" }
-
+            Tags { "LightMode"="Meta" }
             Cull Off
-
             HLSLPROGRAM
-            #pragma vertex UniversalVertexMeta
-            #pragma fragment UniversalFragmentMetaLit
-            #pragma shader_feature EDITOR_VISUALIZATION
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageMetaVertex
+            #pragma fragment LoogaFoliageMetaFragment
 
-            #include "Packages/com.unity.render-pipelines.universal/Shaders/LitInput.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/Shaders/LitMetaPass.hlsl"
+            #include "LoogaFoliageAuxiliary.hlsl"
             ENDHLSL
         }
+        Pass
+        {
+            Name "ShadowCaster"
+            Tags { "LightMode"="ShadowCaster" }
+            ZWrite On
+            ColorMask 0
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageAuxShadow
+            #pragma fragment LoogaFoliageAuxDepth
+            #pragma multi_compile_vertex _ _CASTING_PUNCTUAL_LIGHT_SHADOW
+            #include "LoogaFoliageAuxiliary.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "DepthOnly"
+            Tags { "LightMode"="DepthOnly" }
+            ZWrite On
+            ColorMask R
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageAuxVertex
+            #pragma fragment LoogaFoliageAuxDepth
 
-        UsePass "Universal Render Pipeline/Lit/SHADOWCASTER"
-        UsePass "Universal Render Pipeline/Lit/DEPTHONLY"
-        UsePass "Universal Render Pipeline/Lit/DEPTHNORMALS"
-        UsePass "Hidden/LoogaSoft/Foliage Model Parameters/Grass Material Extras"
+            #include "LoogaFoliageAuxiliary.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "DepthNormals"
+            Tags { "LightMode"="DepthNormals" }
+            ZWrite On
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageAuxVertex
+            #pragma fragment LoogaFoliageAuxNormal
+            #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
+            #include "LoogaFoliageAuxiliary.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "MotionVectors"
+            Tags { "LightMode"="MotionVectors" }
+            ZWrite On
+            ColorMask RG
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageAuxVertex
+            #pragma fragment LoogaFoliageAuxMotion
+
+            #include "LoogaFoliageAuxiliary.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "MaterialExtras"
+            Tags { "LightMode"="LoogaMaterialExtras" }
+            ZWrite Off
+            ZTest Equal
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaFoliageAuxVertex
+            #pragma fragment LoogaFoliageAuxExtras
+
+            #include "LoogaFoliageAuxiliary.hlsl"
+            ENDHLSL
+        }
     }
 
     CustomEditor "LoogaSoft.Lighting.Editor.LoogaGrassShaderGUI"

@@ -191,6 +191,17 @@ namespace LoogaSoft.Rendering.StreamingVirtualTexturing
             block.SetTexture("_LoogaSvtMask", _channels[2]);
         }
 
+        /// <summary>Bind an owned material to this cache for native or BRG rendering.</summary>
+        public void Bind(Material block, int id)
+        {
+            block.SetFloat("_LoogaSvtId", id);
+            block.SetVector("_LoogaSvtLayout", new Vector4(_asset.Resolution, _asset.TileSize, _asset.MipCount, _asset.Repeat ? 1 : 0));
+            block.SetTexture("_LoogaSvtPageTable", _pageTable);
+            block.SetTexture("_LoogaSvtAlbedo", _channels[0]);
+            block.SetTexture("_LoogaSvtNormal", _channels[1]);
+            block.SetTexture("_LoogaSvtMask", _channels[2]);
+        }
+
         /// <summary>Allows failed pages to be requested again after their file has been repaired.</summary>
         public void RetryFailedPages()
         {

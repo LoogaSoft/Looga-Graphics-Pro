@@ -115,8 +115,14 @@ LoogaRuntimeVirtualTextureSample LoogaRvtSample(float3 positionWS)
 {
     int level = LoogaRvtSelectClipmap(positionWS.xz);
     LoogaRuntimeVirtualTextureSample fineSample = LoogaRvtSampleLevel(positionWS, level);
-    if (level < 0 || level + 1 >= _LoogaRvtClipmapCount)
-        return fineSample;
+    if (level < 0) return fineSample;
+    // An empty fine capture must not hide valid coarse data.
+    [loop] while (fineSample.coverage <= 0.001 && level + 1 < _LoogaRvtClipmapCount)
+    {
+        level++;
+        fineSample = LoogaRvtSampleLevel(positionWS, level);
+    }
+    if (level + 1 >= _LoogaRvtClipmapCount) return fineSample;
 
     float4 clipmap = _LoogaRvtCenterExtents[level];
     float2 normalizedDelta = abs(positionWS.xz - clipmap.xy) / clipmap.z;

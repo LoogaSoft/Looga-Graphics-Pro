@@ -103,21 +103,21 @@ float3 LoogaProfileDirectSpecular(
     float3 f0, float perceptualRoughness, float NoL, float NoV,
     float NoH, float VoH)
 {
+    float3 specular = 0.0;
     if (_LoogaProfileDirectSpecularModel == LOOGA_SPECULAR_BECKMANN)
     {
         float roughness = perceptualRoughness * perceptualRoughness;
-        return EvaluateLoogaDirectBeckmannSpecular(
-            f0, roughness, NoL, NoV, NoH, VoH);
+        specular = EvaluateLoogaDirectBeckmannSpecular(f0, roughness, NoL, NoV, NoH, VoH);
     }
-
-    if (_LoogaProfileDirectSpecularModel == LOOGA_SPECULAR_PHONG)
+    else if (_LoogaProfileDirectSpecularModel == LOOGA_SPECULAR_PHONG)
     {
-        return LoogaProfilePhongSpecular(
-            f0, perceptualRoughness, NoL, NoV, NoH, VoH);
+        specular = LoogaProfilePhongSpecular(f0, perceptualRoughness, NoL, NoV, NoH, VoH);
     }
-
-    return EvaluateLoogaBurleyMatchedGGXSpecular(
-        f0, perceptualRoughness, NoL, NoV, NoH, VoH);
+    else
+    {
+        specular = EvaluateLoogaBurleyMatchedGGXSpecular(f0, perceptualRoughness, NoL, NoV, NoH, VoH);
+    }
+    return specular;
 }
 
 float3 EvaluateLighting_Configurable(

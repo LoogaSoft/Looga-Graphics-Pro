@@ -37,3 +37,17 @@ The renderer feature requires **Deferred+** for its full deferred-light replacem
 An opaque Shader Graph using the standard URP Lit target participates through its regular GBuffer data. Looga can apply the selected lighting model with calibrated defaults, but it cannot recover material data the shader never wrote, such as an independent Minnaert coefficient, a secondary specular lobe, or an SSSS profile.
 
 Use the Looga Lit target or HLSL template when the material needs those controls or when its forward appearance must match Looga's deferred lighting.
+
+## Shared instancing
+
+Looga Instancing accepts standard DOTS-compatible opaque and cutout mesh shaders. Basic submission needs no custom Looga profile.
+Preserve instance-ID setup and transfer in every surface, depth, normal, shadow, motion and custom material pass.
+Keep one compatible UnityPerMaterial layout across those passes. Retain BRG variants in player builds.
+The HLSL template includes these contracts, including object motion and depth normals.
+
+Additional per-instance data, shader deformation bounds and streamed texture bindings use explicit material profiles.
+Graphics Pro supplies LoogaSvtInstanceProfile for its existing SVT cache. General instancing does not automatically translate property blocks.
+Transparent sorting and skinned mesh submission retain native rendering.
+
+The supported static and vegetation material fixtures match native output in Forward+ and Deferred+, including custom lighting and auxiliary buffers.
+Changing template vertex deformation or opacity requires matching edits in the auxiliary passes and new visual checks.

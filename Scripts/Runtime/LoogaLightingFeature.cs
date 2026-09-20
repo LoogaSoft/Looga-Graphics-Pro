@@ -855,6 +855,11 @@ namespace LoogaSoft.Lighting
                         // The fullscreen pass only clears deferred stencil bits. Preserve the
                         // existing hardware depth so later forward/transparent draws still test
                         // against opaque geometry and custom overlay depth.
+                        // Keep the current lighting target bound as a read-only color attachment.
+                        // The shader uses ColorMask 0, but the explicit attachment is required to
+                        // continue D3D12 native render-pass local-preserve state from the preceding
+                        // lighting blit without modifying any color samples.
+                        builder.SetRenderAttachment(activeColor, 0, AccessFlags.Read);
                         builder.SetRenderAttachmentDepth(stencilTexture, AccessFlags.ReadWrite);
                         builder.AllowGlobalStateModification(true);
 

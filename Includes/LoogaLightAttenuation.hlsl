@@ -31,10 +31,8 @@ float LoogaRangeFade(float normalizedDistance, float fadeStart)
 
 float LoogaCurveSampleValue(float4 samplesA, float4 samplesB, int index)
 {
-    if (index < 4)
-        return samplesA[index];
-
-    return samplesB[index - 4];
+    int component = clamp(index, 0, 7);
+    return component < 4 ? samplesA[min(component, 3)] : samplesB[max(component - 4, 0)];
 }
 
 float LoogaSampleAttenuationCurve(int lightIndex, float normalizedDistance)
@@ -90,7 +88,7 @@ float ApplyLoogaLightAttenuation(
         ? saturate(urpAttenuation / urpDistanceAttenuation)
         : 0.0;
 
-    float attenuation;
+    float attenuation = 0.0;
     float remainingDistance = 1.0 - normalizedDistance;
     float sourceRadiusSquared = max(parameters.w * parameters.w, 0.000001);
     float inverseDistanceSquared = rcp(max(distanceSquared, sourceRadiusSquared));

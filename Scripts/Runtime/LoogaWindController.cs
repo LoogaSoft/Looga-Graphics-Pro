@@ -1,16 +1,11 @@
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace LoogaSoft.Lighting
 {
     /// <summary>
-    /// Drives the global Looga wind shader uniforms.
-    /// Drop this component on any GameObject in your scene (an empty "Wind" GameObject
-    /// works fine). The values update every frame in both Play and Edit modes.
-    ///
-    /// Important: a foliage mesh's vertices need to be above the mesh's local origin
-    /// for wind to displace them — the wind weight is a falloff over height. A default
-    /// Unity cube has half its vertices below y=0 and won't visibly sway. Use a tall
-    /// mesh or one whose pivot is at its base.
+    /// Publish global wind inputs in Play and Edit modes.
+    /// Wind weights use vertex height above the mesh origin. Place vegetation pivots at the base.
     /// </summary>
     [ExecuteAlways]
     [AddComponentMenu("Looga Wind Controller")]
@@ -33,25 +28,114 @@ namespace LoogaSoft.Lighting
         [Tooltip("Flutter amplitude in meters. Only affects vertices with non-zero flutter mask.")]
         [Range(0f, 2f)] public float flutterAmount = 0.15f;
 
-        static readonly int DirSpeedID         = Shader.PropertyToID("_LoogaWindDirectionAndSpeed");
-        static readonly int TurbulenceID       = Shader.PropertyToID("_LoogaWindTurbulence");
+        private static int _frame = -1;
+        private static bool _listening;
+        private static Vector4 _currentDirection;
+        private static Vector4 _currentTurbulence;
+        private static Vector4 _previousDirection;
+        private static Vector4 _previousTurbulence;
 
-        void Update() => Apply();
-        void OnEnable() => Apply();
-        void OnValidate() => Apply();
-
-        void Apply()
+#if UNITY_EDITOR
+        private static int _editorFrame;
+        private static void BeginEditorFrame() => _editorFrame++;
+#endif
+        private static int Frame
         {
-            Vector3 d = direction.sqrMagnitude > 0.0001f ? direction.normalized : Vector3.right;
-            Shader.SetGlobalVector(DirSpeedID,   new Vector4(d.x, d.y, d.z, speed));
-            Shader.SetGlobalVector(TurbulenceID, new Vector4(swayAmount, flutterFrequency, flutterAmount, 0f));
+            get
+            {
+#if UNITY_EDITOR
+                if (!Application.isPlaying) return _editorFrame;
+#endif
+                return Time.frameCount;
+            }
         }
 
-        void OnDisable()
+        private void Update() => Apply();
+        private void OnEnable()
         {
-            // Stop wind and reset SSSS modifiers to safe values when this controller is removed.
-            Shader.SetGlobalVector(DirSpeedID,   Vector4.zero);
-            Shader.SetGlobalVector(TurbulenceID, Vector4.zero);
+            EnsureListening();
+            Apply();
+        }
+        private void OnValidate()
+        {
+            if (!isActiveAndEnabled) return;
+            Apply();
+        }
+
+        private static void BeforeCamera(ScriptableRenderContext context, Camera camera) => Publish();
+
+        /// <summary>Publish current and previous wind inputs for a rendering camera.</summary>
+        public static void Publish()
+        {
+            AdvanceHistory();
+            Upload();
+            if (_currentTurbulence == Vector4.zero && _previousTurbulence == Vector4.zero)
+            {
+                RenderPipelineManager.beginCameraRendering -= BeforeCamera;
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.update -= BeginEditorFrame;
+#endif
+                _listening = false;
+            }
+        }
+
+        private static void EnsureListening()
+        {
+            if (_listening) return;
+            RenderPipelineManager.beginCameraRendering += BeforeCamera;
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.update += BeginEditorFrame;
+#endif
+            _listening = true;
+        }
+
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        private static void ResetHistory()
+        {
+            RenderPipelineManager.beginCameraRendering -= BeforeCamera;
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.update -= BeginEditorFrame;
+#endif
+            _listening = false;
+            _frame = -1;
+            _currentDirection = _previousDirection = Vector4.zero;
+            _currentTurbulence = _previousTurbulence = Vector4.zero;
+            Upload();
+        }
+
+        /// <summary>Apply the authored wind values without changing the previous frame inputs.</summary>
+        public void Apply()
+        {
+            EnsureListening();
+            AdvanceHistory();
+            Vector3 normalized = direction.sqrMagnitude > 0.0001f ? direction.normalized : Vector3.right;
+            _currentDirection = new Vector4(normalized.x, normalized.y, normalized.z, speed);
+            _currentTurbulence = new Vector4(swayAmount, flutterFrequency, flutterAmount, 0);
+            Upload();
+        }
+
+        private static void AdvanceHistory()
+        {
+            if (_frame == Frame) return;
+            _previousDirection = _currentDirection;
+            _previousTurbulence = _currentTurbulence;
+            _frame = Frame;
+        }
+
+        private static void Upload()
+        {
+            Shader.SetGlobalVector("_LoogaWindDirectionAndSpeed", _currentDirection);
+            Shader.SetGlobalVector("_LoogaWindTurbulence", _currentTurbulence);
+            Shader.SetGlobalVector("_LoogaPreviousWindDirectionAndSpeed", _previousDirection);
+            Shader.SetGlobalVector("_LoogaPreviousWindTurbulence", _previousTurbulence);
+        }
+
+        private void OnDisable()
+        {
+            AdvanceHistory();
+            _currentDirection = Vector4.zero;
+            _currentTurbulence = Vector4.zero;
+            Upload();
         }
     }
 }

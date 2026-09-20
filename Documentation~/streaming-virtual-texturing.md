@@ -65,7 +65,7 @@ Feedback snapshots retain their cache identity, so delayed requests cannot reach
 
 The first target is Windows/D3D12, Unity 6.3, and URP 17.3 with RenderGraph.
 The shader uses a forward-only opaque PBR pass within Forward or Deferred renderers.
-Depth, normals, shadow, and feedback passes are included.
+Depth, normals, shadow, object-motion and feedback passes are included.
 Base Game cameras and optional Scene views collect feedback.
 Overlay cameras can sample resident data but do not collect additional requests.
 XR, transparent materials, terrain, MicroSplat arrays, skinned renderers, and arbitrary vendor shaders are not integrated.
@@ -82,3 +82,18 @@ SVT can reduce memory use for large texture sets. It adds sampling, feedback, CP
 It does not create texture detail, stream geometry, or guarantee an FPS increase.
 Compare it with native mipmap streaming on representative content before a broad conversion.
 
+
+## Looga Instancing
+
+Create a `LoogaSvtInstanceProfile`, assign the baked SVT asset and page capacity, then assign the profile to an instance population.
+The profile creates an owned material binding and shares the existing LoogaSvtRegistry cache. It does not modify the source material.
+All bindings for an asset must agree on capacity. Disabling the final owner releases its material and cache lease.
+Keep the Graphics Pro SVT renderer feature enabled so BRG draws can request pages.
+
+Native LoogaStreamingVirtualTexture components use a renderer property block. SceneInstanceProvider reports that source as unsupported.
+Explicitly replace that binding with the instance profile before transferring render ownership. Do not submit both owners.
+This is a general mesh integration; it does not add SVT to Looga Terrain's terrain renderer or MicroSplat surface arrays.
+
+Windows/D3D12 Forward+ and Deferred+ tests generate feedback with only BRG geometry visible.
+The tests load pages from disk, then compare surface and moving-object output against a native renderer using the same cache.
+Both paths match exactly in the deterministic fixture. This does not measure a high-resolution production scene.

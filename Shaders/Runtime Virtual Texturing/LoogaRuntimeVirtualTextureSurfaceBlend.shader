@@ -164,6 +164,7 @@ Shader "Looga/Runtime Virtual Texture/Surface Blend"
             Cull [_Cull]
             ZWrite On
             HLSLPROGRAM
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex ReceiverVertex
             #pragma fragment ReceiverFragment
@@ -187,6 +188,7 @@ Shader "Looga/Runtime Virtual Texture/Surface Blend"
             Cull [_Cull]
             ZWrite On
             HLSLPROGRAM
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex ReceiverVertex
             #pragma fragment ReceiverNormals
@@ -202,6 +204,7 @@ Shader "Looga/Runtime Virtual Texture/Surface Blend"
             ZWrite On
             ColorMask R
             HLSLPROGRAM
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex ReceiverVertex
             #pragma fragment ReceiverDepth
@@ -216,6 +219,7 @@ Shader "Looga/Runtime Virtual Texture/Surface Blend"
             ZWrite On
             ColorMask 0
             HLSLPROGRAM
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex ReceiverShadowVertex
             #pragma fragment ReceiverDepth

@@ -71,6 +71,34 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
         // =========================================================
         // 1. GBUFFER PASS
         // =========================================================
+        HLSLINCLUDE
+        #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+        #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaModelParameters.hlsl"
+        CBUFFER_START(UnityPerMaterial)
+            float4 _BaseColor;
+            float _AlphaClip;
+            float _Cutoff;
+            float _BumpScale;
+            float _BackfaceNormalMode;
+            float4 _SpecColor;
+            float _Metallic;
+            float _OcclusionStrength;
+            float _SmoothnessTextureChannel;
+            float _BaseSmoothnessScale;
+            float4 _EmissionColor;
+            float4 _SubsurfaceColor;
+            float _AmbientScatterStrength;
+            float _ScatterWidth;
+            float _TransmissionStrength;
+            float _TransmissionShadowSoftness;
+            LOOGA_MODEL_PARAMETER_CBUFFER_FIELDS;
+            float4 _BaseMap_ST;
+            float4 _BaseMap_TexelSize;
+            float4 _BumpMap_TexelSize;
+        CBUFFER_END
+        #define LOOGA_STATIC_RAW_UV 1
+        ENDHLSL
+
         Pass
         {
             Name "GBuffer"
@@ -85,6 +113,8 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
             }
 
             HLSLPROGRAM
+            #pragma multi_compile_instancing
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex Vert
             #pragma fragment Frag
@@ -118,6 +148,7 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
 
             struct Attributes
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionOS : POSITION;
                 float3 normalOS : NORMAL;
                 float4 tangentOS : TANGENT;
@@ -128,6 +159,7 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
 
             struct Varyings
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionCS : SV_POSITION;
                 float2 uv : TEXCOORD0;
                 float3 normalWS : TEXCOORD1;
@@ -148,38 +180,22 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
             TEXTURE2D(_ThicknessMap);
             LOOGA_DECLARE_MODEL_PARAMETER_TEXTURES;
 
-            CBUFFER_START(UnityPerMaterial)
-                float4 _BaseColor;
-                float _AlphaClip;
-                float _Cutoff;
-                float _BumpScale;
-                float _BackfaceNormalMode;
-                float4 _SpecColor;
-                float _Metallic;
-                float _OcclusionStrength;
-                float _SmoothnessTextureChannel;
-                float _BaseSmoothnessScale;
-                float4 _EmissionColor;
-                float4 _SubsurfaceColor;
-                float _AmbientScatterStrength;
-                float _ScatterWidth;
-                float _TransmissionStrength;
-                float _TransmissionShadowSoftness;
-                LOOGA_MODEL_PARAMETER_CBUFFER_FIELDS;
-            CBUFFER_END
+
 
             #define FragmentOutput LoogaGBufferOutput
 
             Varyings Vert(Attributes input)
             {
-                Varyings output;
+                UNITY_SETUP_INSTANCE_ID(input);
+                Varyings output = (Varyings)0;
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
                 VertexPositionInputs vertexInput = GetVertexPositionInputs(input.positionOS.xyz);
                 VertexNormalInputs normalInput = GetVertexNormalInputs(input.normalOS, input.tangentOS);
                 output.positionCS = vertexInput.positionCS;
                 output.positionWS = vertexInput.positionWS;
                 output.uv = input.uv;
                 output.normalWS = normalInput.normalWS;
-                output.tangentWS = float4(normalInput.tangentWS, input.tangentOS.w);
+                output.tangentWS = float4(normalInput.tangentWS, input.tangentOS.w * GetOddNegativeScale());
                 OUTPUT_LIGHTMAP_UV(input.staticLightmapUV, unity_LightmapST, output.staticLightmapUV);
                 #if defined(DYNAMICLIGHTMAP_ON)
                     output.dynamicLightmapUV = input.dynamicLightmapUV.xy * unity_DynamicLightmapST.xy + unity_DynamicLightmapST.zw;
@@ -192,6 +208,7 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
 
             FragmentOutput Frag(Varyings input, bool isFrontFace : SV_IsFrontFace)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 FragmentOutput outGBuffer;
                 half4 albedo = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv) * _BaseColor;
                 if (_AlphaClip > 0.5) clip(albedo.a - _Cutoff);
@@ -276,6 +293,8 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
             Cull [_Cull]
 
             HLSLPROGRAM
+            #pragma multi_compile_instancing
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma target 4.5
             #pragma vertex VertForward
             #pragma fragment FragForward
@@ -313,6 +332,7 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
 
             struct AttributesForward
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionOS : POSITION;
                 float3 normalOS : NORMAL;
                 float4 tangentOS : TANGENT;
@@ -323,6 +343,7 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
 
             struct VaryingsForward
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionCS : SV_POSITION;
                 float3 positionWS : TEXCOORD0;
                 float2 uv : TEXCOORD1;
@@ -343,36 +364,20 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
             TEXTURE2D(_ThicknessMap);
             LOOGA_DECLARE_MODEL_PARAMETER_TEXTURES;
 
-            CBUFFER_START(UnityPerMaterial)
-                float4 _BaseColor;
-                float _AlphaClip;
-                float _Cutoff;
-                float _BumpScale;
-                float _BackfaceNormalMode;
-                float4 _SpecColor;
-                float _Metallic;
-                float _OcclusionStrength;
-                float _SmoothnessTextureChannel;
-                float _BaseSmoothnessScale;
-                float4 _EmissionColor;
-                float4 _SubsurfaceColor;
-                float _AmbientScatterStrength;
-                float _ScatterWidth;
-                float _TransmissionStrength;
-                float _TransmissionShadowSoftness;
-                LOOGA_MODEL_PARAMETER_CBUFFER_FIELDS;
-            CBUFFER_END
+
 
             VaryingsForward VertForward(AttributesForward input)
             {
-                VaryingsForward output;
+                UNITY_SETUP_INSTANCE_ID(input);
+                VaryingsForward output = (VaryingsForward)0;
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
                 VertexPositionInputs vertexInput = GetVertexPositionInputs(input.positionOS.xyz);
                 VertexNormalInputs normalInput = GetVertexNormalInputs(input.normalOS, input.tangentOS);
                 output.positionCS = vertexInput.positionCS;
                 output.positionWS = vertexInput.positionWS;
                 output.uv = input.uv;
                 output.normalWS = normalInput.normalWS;
-                output.tangentWS = float4(normalInput.tangentWS, input.tangentOS.w);
+                output.tangentWS = float4(normalInput.tangentWS, input.tangentOS.w * GetOddNegativeScale());
                 OUTPUT_LIGHTMAP_UV(input.staticLightmapUV, unity_LightmapST, output.staticLightmapUV);
                 #if defined(DYNAMICLIGHTMAP_ON)
                     output.dynamicLightmapUV = input.dynamicLightmapUV.xy * unity_DynamicLightmapST.xy + unity_DynamicLightmapST.zw;
@@ -385,6 +390,7 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
 
             half4 FragForward(VaryingsForward input, bool isFrontFace : SV_IsFrontFace) : SV_Target
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 half4 albedoSample = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv) * _BaseColor;
                 if (_AlphaClip > 0.5) clip(albedoSample.a - _Cutoff);
                 half3 albedo = albedoSample.rgb;
@@ -489,6 +495,8 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
             Cull [_Cull]
 
             HLSLPROGRAM
+            #pragma multi_compile_instancing
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
             #pragma vertex VertProfile
             #pragma fragment FragProfile
             #pragma shader_feature_local_fragment _USE_SSSS
@@ -497,24 +505,23 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
 
             struct AttributesProfile
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionOS : POSITION;
             };
 
             struct VaryingsProfile
             {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
                 float4 positionCS : SV_POSITION;
             };
 
-            CBUFFER_START(UnityPerMaterial)
-                float4 _SubsurfaceColor;
-                float _AmbientScatterStrength;
-                float _ScatterWidth;
-                float _TransmissionShadowSoftness;
-            CBUFFER_END
+
 
             VaryingsProfile VertProfile(AttributesProfile input)
             {
-                VaryingsProfile output;
+                UNITY_SETUP_INSTANCE_ID(input);
+                VaryingsProfile output = (VaryingsProfile)0;
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
                 output.positionCS = TransformObjectToHClip(input.positionOS.xyz);
                 return output;
             }
@@ -527,6 +534,7 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
 
             ProfileOutput FragProfile(VaryingsProfile input)
             {
+                UNITY_SETUP_INSTANCE_ID(input);
                 #if !defined(_USE_SSSS)
                     discard;
                 #endif
@@ -550,19 +558,144 @@ Shader "LoogaSoft/Samples/Custom Lit Template"
             Cull Off
 
             HLSLPROGRAM
-            #pragma vertex UniversalVertexMeta
-            #pragma fragment UniversalFragmentMetaLit
+            #pragma vertex LoogaStaticMetaVertex
+            #pragma fragment LoogaStaticMetaFragment
             #pragma shader_feature_local_fragment _EMISSION
             #pragma shader_feature EDITOR_VISUALIZATION
 
-            #include "Packages/com.unity.render-pipelines.universal/Shaders/LitInput.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/Shaders/LitMetaPass.hlsl"
+
+            #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaStaticMeshPasses.hlsl"
             ENDHLSL
         }
 
-        UsePass "Universal Render Pipeline/Lit/SHADOWCASTER"
-        UsePass "Universal Render Pipeline/Lit/DEPTHONLY"
-        UsePass "Hidden/LoogaSoft/Model Parameters/Looga Material Extras"
+        Pass
+        {
+            Name "ShadowCaster"
+            Tags { "LightMode"="ShadowCaster" }
+            Cull [_Cull]
+            ZWrite On ZTest LEqual ColorMask 0
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaStaticShadow
+            #pragma fragment LoogaStaticDepth
+            #pragma multi_compile_vertex _ _CASTING_PUNCTUAL_LIGHT_SHADOW
+            #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaStaticMeshPasses.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "DepthNormals"
+            Tags { "LightMode"="DepthNormals" }
+            Cull [_Cull]
+            ZWrite On
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaStaticVertex
+            #pragma fragment LoogaStaticNormals
+            #pragma multi_compile_fragment _ _GBUFFER_NORMALS_OCT
+            #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaStaticMeshPasses.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "DepthOnly"
+            Tags { "LightMode"="DepthOnly" }
+            Cull [_Cull]
+            ZWrite On ColorMask R
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #pragma vertex LoogaStaticVertex
+            #pragma fragment LoogaStaticDepth
+            #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaStaticMeshPasses.hlsl"
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "Looga Material Extras"
+            Tags { "LightMode" = "LoogaMaterialExtras" }
+
+            ZWrite Off
+            ZTest Equal
+            Cull [_Cull]
+
+            HLSLPROGRAM
+            #pragma multi_compile_instancing
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
+            #pragma vertex VertModelParameters
+            #pragma fragment FragModelParameters
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaModelParameters.hlsl"
+
+            struct AttributesModelParameters
+            {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+                float4 positionOS : POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            struct VaryingsModelParameters
+            {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+                float4 positionCS : SV_POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            LOOGA_DECLARE_MODEL_PARAMETER_TEXTURES;
+
+
+
+            VaryingsModelParameters VertModelParameters(AttributesModelParameters input)
+            {
+                UNITY_SETUP_INSTANCE_ID(input);
+                VaryingsModelParameters output = (VaryingsModelParameters)0;
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
+                output.positionCS = TransformObjectToHClip(input.positionOS.xyz);
+                output.uv = input.uv;
+                return output;
+            }
+
+            struct ModelParameterOutput
+            {
+                half4 materialExtras : SV_Target0;
+                half4 modelParameters : SV_Target1;
+            };
+
+            ModelParameterOutput FragModelParameters(VaryingsModelParameters input)
+            {
+                UNITY_SETUP_INSTANCE_ID(input);
+                ModelParameterOutput output;
+                output.materialExtras = 0.0h;
+                output.modelParameters = LOOGA_SAMPLE_MODEL_PARAMETERS(input.uv);
+                return output;
+            }
+            ENDHLSL
+        }
+
+        Pass
+        {
+            Name "MotionVectors"
+            Tags { "LightMode"="MotionVectors" }
+            Cull [_Cull]
+            ColorMask RG
+            HLSLPROGRAM
+            #pragma shader_feature_local _ALPHATEST_ON
+            #pragma multi_compile _ LOD_FADE_CROSSFADE
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/SurfaceInput.hlsl"
+            #define _BaseMap_ST float4(1, 1, 0, 0)
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/ObjectMotionVectors.hlsl"
+            ENDHLSL
+        }
+
     }
 
     CustomEditor "LoogaSoft.Lighting.Editor.LoogaLitShaderGUI"
