@@ -29,7 +29,7 @@ layers, shadows, and screen-space ambient occlusion. See [Custom light
 attenuation](Documentation~/light-attenuation.md) for setup and baked-lighting
 limits.
 
-Tonemapping is controlled exclusively by the **Looga Tonemapper** Volume override. A new override defaults to **None** with all parameter overrides unchecked, so adding it leaves the image unchanged. Override its mode and choose a curve to opt in. See [Volume-controlled tonemapping](Documentation~/tonemapper.md) for usage and upgrade behavior.
+Bloom and tonemapping are controlled by the **Looga Post Processing** Volume override and renderer feature. Each effect is off by default, so adding the override leaves the image unchanged. The bloom is an energy-conserving compute bloom with lens dirt that runs on the linear HDR camera color. It uses a mip pyramid, or an FFT convolution with a custom lens kernel. See [Looga Post Processing](Documentation~/post-processing.md) for setup, parameters, limits, and the upgrade from Looga Tonemapper.
 
 ## Shader Variants
 

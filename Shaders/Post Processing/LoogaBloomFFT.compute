@@ -1,0 +1,183 @@
+// Looga FFT convolution bloom. LoogaBloomFFT dispatches the kernels in this order:
+// Kernel spectrum, only when the kernel changes: GenerateKernel, then the forward FFT of the rows and the columns.
+// Each frame: Pack, forward FFT of the rows and the columns, Multiply, inverse FFT of the columns and the rows.
+// The buffers are N x N complex images. Two real color channels share one complex value: xy = R + iG, zw = B + i0.
+#pragma kernel GenerateKernel
+#pragma kernel Pack
+#pragma kernel Multiply
+#pragma kernel FFT256 FFT_SIZE=256
+#pragma kernel FFT512 FFT_SIZE=512
+#pragma kernel FFT1024 FFT_SIZE=1024
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+
+// Each FFT kernel compiles with its own size. The other kernels do not use the FFT code.
+#ifndef FFT_SIZE
+#define FFT_SIZE 256
+#endif
+#if FFT_SIZE == 1024
+#define FFT_KERNEL FFT1024
+#elif FFT_SIZE == 512
+#define FFT_KERNEL FFT512
+#else
+#define FFT_KERNEL FFT256
+#endif
+
+// Angle in degrees at the kernel radius for the default kernel.
+#define DEFAULT_KERNEL_ANGLE 20.0
+
+Texture2D<float4> _Image;
+Texture2D<float4> _KernelTexture;
+Texture2D<float4> _Spectrum;
+Texture2D<float4> _KernelSpectrum;
+RWTexture2D<float4> _Buffer;
+SamplerState sampler_LinearClamp;
+
+// N, the width and the height of the buffers.
+uint _Size;
+// Image region in the buffer: width, height, 1 / width, 1 / height.
+float4 _Region;
+// Kernel radius in texels, kernel texture mip level, 1 when the kernel texture is used.
+float4 _KernelParams;
+// 1 = the FFT transforms the columns, 0 = the rows.
+uint _Vertical;
+// 1 = inverse FFT, 0 = forward FFT.
+uint _Inverse;
+
+groupshared float4 gs_Line[FFT_SIZE];
+
+float2 ComplexMul(float2 a, float2 b)
+{
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+float2 Conjugate(float2 value)
+{
+    return float2(value.x, -value.y);
+}
+
+// Glare point spread function of Spencer et al., "Physically-Based Glare Effects for Digital Images" (1995), without
+// its core. The light that does not scatter stays in the image, so the kernel contains only the scattered part.
+// The angle does not go below half a texel, so that the center texel does not contain a singular value.
+float DefaultKernel(float radius, float halfTexel)
+{
+    if (radius > 1.0)
+    {
+        return 0.0;
+    }
+    float angle = max(radius, halfTexel) * DEFAULT_KERNEL_ANGLE + 0.02;
+    float window = 1.0 - smoothstep(0.7, 1.0, radius);
+    return (0.478 * 20.91 / (angle * angle * angle) + 0.138 * 72.37 / (angle * angle)) * window;
+}
+
+// Writes the kernel with its center at texel 0. The texels above N / 2 hold the negative offsets.
+// The spectrum then has no phase shift, and the convolution does not move the image.
+[numthreads(8, 8, 1)]
+void GenerateKernel(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= _Size))
+    {
+        return;
+    }
+    float2 offset = float2(id.xy) - float(_Size) * float2(id.xy >= _Size / 2);
+    float radius = _KernelParams.x;
+    float3 value = 0.0;
+    if (_KernelParams.z > 0.5)
+    {
+        float2 uv = offset / (2.0 * radius) + 0.5;
+        if (all(uv >= 0.0) && all(uv <= 1.0))
+        {
+            value = max(_KernelTexture.SampleLevel(sampler_LinearClamp, uv, _KernelParams.y).rgb, 0.0);
+        }
+    }
+    else
+    {
+        value = DefaultKernel(length(offset) / radius, 0.5 / radius);
+    }
+    _Buffer[id.xy] = float4(value.r, value.g, value.b, 0.0);
+}
+
+// Copies the thresholded image into the region at the buffer origin. The rest of the buffer stays black, so that
+// the circular convolution does not wrap light around the borders.
+[numthreads(8, 8, 1)]
+void Pack(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= _Size))
+    {
+        return;
+    }
+    float3 color = 0.0;
+    if (all(id.xy < uint2(_Region.xy)))
+    {
+        color = _Image.SampleLevel(sampler_LinearClamp, (float2(id.xy) + 0.5) * _Region.zw, 0).rgb;
+    }
+    _Buffer[id.xy] = float4(color.r, color.g, color.b, 0.0);
+}
+
+// Multiplies the image spectrum by the kernel spectrum per channel.
+// The R and G spectra share one complex spectrum Z. They separate with the conjugate symmetry of real signals:
+// R(k) = (Z(k) + conj(Z(-k))) / 2 and G(k) = (Z(k) - conj(Z(-k))) / 2i.
+// Each kernel channel is divided by its sum, the value at frequency 0, so the bloom keeps the light energy.
+[numthreads(8, 8, 1)]
+void Multiply(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= _Size))
+    {
+        return;
+    }
+    uint2 negative = (_Size - id.xy) & (_Size - 1);
+    float4 image = _Spectrum[id.xy];
+    float4 imageNegative = _Spectrum[negative];
+    float4 kernel = _KernelSpectrum[id.xy];
+    float4 kernelNegative = _KernelSpectrum[negative];
+    float3 sums = max(_KernelSpectrum[uint2(0, 0)].xyz, 1e-20);
+
+    float2 imageR = 0.5 * (image.xy + Conjugate(imageNegative.xy));
+    float2 imageG = 0.5 * (image.xy - Conjugate(imageNegative.xy));
+    float2 kernelR = 0.5 * (kernel.xy + Conjugate(kernelNegative.xy));
+    float2 kernelG = 0.5 * (kernel.xy - Conjugate(kernelNegative.xy));
+
+    // imageG and kernelG are i * G and i * Kg. Their product is -G * Kg, so the sign changes.
+    float2 red = ComplexMul(imageR, kernelR) / sums.x;
+    float2 green = -ComplexMul(imageG, kernelG) / sums.y;
+    float2 blue = ComplexMul(image.zw, kernel.zw) / sums.z;
+    // The result is the spectrum of R' + iG': red + i * green.
+    _Buffer[id.xy] = float4(red.x - green.y, red.y + green.x, blue);
+}
+
+// Radix-2 FFT of one row or one column per thread group, in groupshared memory.
+// The inverse FFT divides by N in each direction, so a forward and an inverse transform return the input.
+[numthreads(FFT_SIZE / 2, 1, 1)]
+void FFT_KERNEL(uint3 groupId : SV_GroupID, uint thread : SV_GroupIndex)
+{
+    uint row = groupId.x;
+    uint bits = firstbithigh(FFT_SIZE);
+    for (uint index = thread; index < FFT_SIZE; index += FFT_SIZE / 2)
+    {
+        uint2 texel = _Vertical ? uint2(row, index) : uint2(index, row);
+        gs_Line[reversebits(index) >> (32 - bits)] = _Buffer[texel];
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    float direction = _Inverse ? 1.0 : -1.0;
+    for (uint span = 1; span < FFT_SIZE; span <<= 1)
+    {
+        uint position = thread & (span - 1);
+        uint first = (thread - position) * 2 + position;
+        float2 twiddle;
+        sincos(direction * PI * position / span, twiddle.y, twiddle.x);
+        float4 a = gs_Line[first];
+        float4 b = gs_Line[first + span];
+        b = float4(ComplexMul(b.xy, twiddle), ComplexMul(b.zw, twiddle));
+        gs_Line[first] = a + b;
+        gs_Line[first + span] = a - b;
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    float scale = _Inverse ? 1.0 / FFT_SIZE : 1.0;
+    for (uint index2 = thread; index2 < FFT_SIZE; index2 += FFT_SIZE / 2)
+    {
+        uint2 texel = _Vertical ? uint2(row, index2) : uint2(index2, row);
+        _Buffer[texel] = gs_Line[index2] * scale;
+    }
+}

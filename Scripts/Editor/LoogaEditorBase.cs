@@ -41,7 +41,7 @@ namespace LoogaSoft.Lighting.Editor
             EditorGUILayout.Space(3);
         }
 
-        protected static void DrawSection(string title, string prefKey, bool defaultShow, Action content)
+        protected internal static void DrawSection(string title, string prefKey, bool defaultShow, Action content)
         {
             EnsureStyles();
 

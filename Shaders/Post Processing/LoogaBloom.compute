@@ -1,0 +1,189 @@
+// Looga bloom pyramid. LoogaBloomKernels dispatches the kernels in this order:
+// 1. Prefilter: camera color -> level 0 at half size. 13-tap filter with a Karis average and the threshold curve.
+// 2. Downsample: level i - 1 -> level i. 13-tap filter (Jimenez, "Next Generation Post Processing in Call of Duty").
+// 3. Upsample: from the smallest level to level 0. 9-tap tent filter blended over the same-size level.
+#pragma kernel Prefilter
+#pragma kernel Downsample
+#pragma kernel Upsample
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+
+#define GROUP_SIZE 8
+// An 8 x 8 group writes 8 x 8 texels at half size. The 13-tap filter of one output texel reads 6 x 6 source
+// texels, so the group reads a tile of 2 * 8 + 4 = 20 source texels on each side into groupshared memory.
+#define TILE_SIZE 20
+#define TILE_TEXELS (TILE_SIZE * TILE_SIZE)
+// Half-float targets hold values up to 65504. The clamp also removes infinity.
+#define MAX_BLOOM_VALUE 65000.0
+
+Texture2D<float4> _Source;
+Texture2D<float4> _Higher;
+Texture2D<float4> _Lower;
+RWTexture2D<float4> _Destination;
+SamplerState sampler_LinearClamp;
+
+// Width, height, 1 / width, 1 / height.
+float4 _SourceSize;
+float4 _DestinationSize;
+float4 _LowerSize;
+// Threshold, threshold - knee, 2 * knee, 0.25 / knee. A threshold of 0 disables the curve.
+float4 _Threshold;
+float _Scatter;
+
+groupshared float3 gs_Tile[TILE_TEXELS];
+
+float BloomLuminance(float3 color)
+{
+    return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
+
+float3 LoadSource(int2 texel)
+{
+    texel = clamp(texel, int2(0, 0), int2(_SourceSize.xy) - 1);
+    float3 color = _Source.Load(int3(texel, 0)).rgb;
+    // Remove NaN, infinity and negative values before they spread through the pyramid.
+    color = AnyIsNaN(color) ? float3(0.0, 0.0, 0.0) : color;
+    return clamp(color, 0.0, MAX_BLOOM_VALUE);
+}
+
+// Loads the source tile of this group. Output texel o covers source texels 2o and 2o + 1.
+void LoadTile(uint2 groupId, uint threadIndex)
+{
+    int2 origin = int2(groupId * (GROUP_SIZE * 2)) - 2;
+    for (uint index = threadIndex; index < TILE_TEXELS; index += GROUP_SIZE * GROUP_SIZE)
+    {
+        gs_Tile[index] = LoadSource(origin + int2(index % TILE_SIZE, index / TILE_SIZE));
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+
+// Average of the 2 x 2 source texels around a texel corner. It equals one bilinear sample at that corner.
+// The output texel center is the corner between source texels 2o and 2o + 1. Offset is in source texels.
+float3 Box(uint2 localTexel, int2 offset)
+{
+    int2 corner = int2(localTexel * 2) + 2 + offset;
+    int index = corner.y * TILE_SIZE + corner.x;
+    return 0.25 * (gs_Tile[index] + gs_Tile[index + 1] + gs_Tile[index + TILE_SIZE] + gs_Tile[index + TILE_SIZE + 1]);
+}
+
+// The 13 taps form one inner group and four overlapping outer groups of four taps each.
+struct FilterGroups
+{
+    float3 inner;
+    float3 topLeft;
+    float3 topRight;
+    float3 bottomLeft;
+    float3 bottomRight;
+};
+
+FilterGroups Filter13(uint2 localTexel)
+{
+    float3 a = Box(localTexel, int2(-2, -2));
+    float3 b = Box(localTexel, int2(0, -2));
+    float3 c = Box(localTexel, int2(2, -2));
+    float3 d = Box(localTexel, int2(-1, -1));
+    float3 e = Box(localTexel, int2(1, -1));
+    float3 f = Box(localTexel, int2(-2, 0));
+    float3 g = Box(localTexel, int2(0, 0));
+    float3 h = Box(localTexel, int2(2, 0));
+    float3 i = Box(localTexel, int2(-1, 1));
+    float3 j = Box(localTexel, int2(1, 1));
+    float3 k = Box(localTexel, int2(-2, 2));
+    float3 l = Box(localTexel, int2(0, 2));
+    float3 m = Box(localTexel, int2(2, 2));
+
+    FilterGroups groups;
+    groups.inner = (d + e + i + j) * 0.25;
+    groups.topLeft = (a + b + f + g) * 0.25;
+    groups.topRight = (b + c + g + h) * 0.25;
+    groups.bottomLeft = (f + g + k + l) * 0.25;
+    groups.bottomRight = (g + h + l + m) * 0.25;
+    return groups;
+}
+
+// Partial Karis average (Jimenez): each group weighs 1 / (1 + luminance) in addition to its filter weight.
+// A highlight that only some groups see loses most of its weight, so sub-pixel highlights do not flicker.
+// Bright areas that fill the footprint keep their value, because all group weights are then equal.
+float3 KarisAverage(FilterGroups groups)
+{
+    float innerWeight = 0.5 / (1.0 + BloomLuminance(groups.inner));
+    float topLeftWeight = 0.125 / (1.0 + BloomLuminance(groups.topLeft));
+    float topRightWeight = 0.125 / (1.0 + BloomLuminance(groups.topRight));
+    float bottomLeftWeight = 0.125 / (1.0 + BloomLuminance(groups.bottomLeft));
+    float bottomRightWeight = 0.125 / (1.0 + BloomLuminance(groups.bottomRight));
+    float3 sum = groups.inner * innerWeight + groups.topLeft * topLeftWeight + groups.topRight * topRightWeight +
+        groups.bottomLeft * bottomLeftWeight + groups.bottomRight * bottomRightWeight;
+    return sum / (innerWeight + topLeftWeight + topRightWeight + bottomLeftWeight + bottomRightWeight);
+}
+
+float3 WeightedAverage(FilterGroups groups)
+{
+    return groups.inner * 0.5 + (groups.topLeft + groups.topRight + groups.bottomLeft + groups.bottomRight) * 0.125;
+}
+
+// Quadratic soft knee below the threshold, linear above it.
+float3 ApplyThreshold(float3 color)
+{
+    if (_Threshold.x <= 0.0)
+    {
+        return color;
+    }
+    float brightness = Max3(color.r, color.g, color.b);
+    float soft = clamp(brightness - _Threshold.y, 0.0, _Threshold.z);
+    soft = soft * soft * _Threshold.w;
+    return color * max(soft, brightness - _Threshold.x) / max(brightness, 1e-4);
+}
+
+float3 Tent(Texture2D<float4> source, float2 uv, float2 texel)
+{
+    float4 offset = texel.xyxy * float4(1.0, 1.0, -1.0, 0.0);
+    float3 sum = source.SampleLevel(sampler_LinearClamp, uv - offset.xy, 0.0).rgb;
+    sum += source.SampleLevel(sampler_LinearClamp, uv - offset.wy, 0.0).rgb * 2.0;
+    sum += source.SampleLevel(sampler_LinearClamp, uv - offset.zy, 0.0).rgb;
+    sum += source.SampleLevel(sampler_LinearClamp, uv + offset.zw, 0.0).rgb * 2.0;
+    sum += source.SampleLevel(sampler_LinearClamp, uv, 0.0).rgb * 4.0;
+    sum += source.SampleLevel(sampler_LinearClamp, uv + offset.xw, 0.0).rgb * 2.0;
+    sum += source.SampleLevel(sampler_LinearClamp, uv + offset.zy, 0.0).rgb;
+    sum += source.SampleLevel(sampler_LinearClamp, uv + offset.wy, 0.0).rgb * 2.0;
+    sum += source.SampleLevel(sampler_LinearClamp, uv + offset.xy, 0.0).rgb;
+    return sum * (1.0 / 16.0);
+}
+
+[numthreads(GROUP_SIZE, GROUP_SIZE, 1)]
+void Prefilter(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex,
+    uint3 id : SV_DispatchThreadID)
+{
+    LoadTile(groupId.xy, groupIndex);
+    if (any(id.xy >= uint2(_DestinationSize.xy)))
+    {
+        return;
+    }
+    float3 color = ApplyThreshold(KarisAverage(Filter13(groupThreadId.xy)));
+    _Destination[id.xy] = float4(color, 1.0);
+}
+
+[numthreads(GROUP_SIZE, GROUP_SIZE, 1)]
+void Downsample(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex,
+    uint3 id : SV_DispatchThreadID)
+{
+    LoadTile(groupId.xy, groupIndex);
+    if (any(id.xy >= uint2(_DestinationSize.xy)))
+    {
+        return;
+    }
+    _Destination[id.xy] = float4(WeightedAverage(Filter13(groupThreadId.xy)), 1.0);
+}
+
+// The lerp keeps the pyramid at unit gain, so the bloom holds the same total light as its source.
+[numthreads(GROUP_SIZE, GROUP_SIZE, 1)]
+void Upsample(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= uint2(_DestinationSize.xy)))
+    {
+        return;
+    }
+    float2 uv = (id.xy + 0.5) * _DestinationSize.zw;
+    float3 lower = Tent(_Lower, uv, _LowerSize.zw);
+    float3 higher = _Higher.Load(int3(id.xy, 0)).rgb;
+    _Destination[id.xy] = float4(lerp(higher, lower, _Scatter), 1.0);
+}

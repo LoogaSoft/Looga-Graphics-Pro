@@ -283,16 +283,17 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
         float LoogaReceiverNoise(float2 screenUv)
         {
             int2 pixel = (int2)floor(screenUv * _ScreenParams.xy);
+            float noise = LoogaHashNoise(pixel);
             if (_LoogaBlueNoiseAvailable > 0.5)
             {
                 uint2 blueNoiseTexel = asuint(pixel) & 63u;
-                return LOAD_TEXTURE2D_LOD(
+                noise = LOAD_TEXTURE2D_LOD(
                     _LoogaBlueNoiseTexture,
                     blueNoiseTexel,
                     0).a;
             }
 
-            return LoogaHashNoise(pixel);
+            return noise;
         }
 
         float LoogaRawVisibility(
@@ -486,11 +487,12 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
         {
             float worldTexel = _LoogaClipmapRadii[level].y;
             float filterRadiusWorld = penumbraWorld;
+            float filteredVisibility = LoogaRawVisibility(
+                shadowCoord,
+                receiverBiasWorld,
+                level);
             if (filterRadiusWorld <= worldTexel * 0.5)
-                return LoogaRawVisibility(
-                    shadowCoord,
-                    receiverBiasWorld,
-                    level);
+                return filteredVisibility;
 
             int filterSampleCount = clamp(
                 (int)_LoogaShadowSampleCounts.y,
@@ -536,7 +538,10 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
                 weightSum += 1.0;
             }
 
-            return visibility / max(weightSum, 0.0001);
+            if (weightSum > 0.0)
+                filteredVisibility = visibility / weightSum;
+
+            return filteredVisibility;
         }
 
         LoogaShadowEvaluation LoogaEvaluateLevel(

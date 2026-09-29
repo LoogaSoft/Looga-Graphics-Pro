@@ -2,6 +2,7 @@
     "name": "LoogaSoft.Lighting.Tests.Editor",
     "references": [
         "LoogaSoft.Lighting.Runtime",
+        "LoogaSoft.Lighting.Editor",
         "Unity.RenderPipelines.Core.Runtime",
         "Unity.RenderPipelines.Universal.Runtime"
     ],

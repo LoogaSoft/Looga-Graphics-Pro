@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0 - 2026-09-27
+
+- Add the **Looga Post Processing** Volume override and renderer feature. They contain bloom and tonemapping, and later post-processing effects.
+- Add an energy-conserving compute bloom: Karis-average prefilter with a soft threshold knee, 13-tap downsample and 9-tap tent upsample in groupshared tiles, transient Render Graph textures, scatter, tint, and lens dirt.
+- Add an FFT Convolution bloom mode. It convolves the thresholded image with a kernel texture or a physically based default glare kernel, with per-channel energy normalization and a cached kernel spectrum.
+- Move tonemapping from the Looga Lighting renderer feature to the Looga Post Processing feature. Curve IDs, parameters, and defaults are unchanged.
+- Add **Tools > LoogaSoft > Migrate Tonemapper To Post Processing** to convert Looga Tonemapper overrides and add the new feature to renderers.
+- Breaking: the **Looga Tonemapper** override is obsolete and has no effect. Tonemapping requires the Looga Post Processing feature. Run the migration after the update.
+
 ## 1.3.9 - 2026-09-19
 
 - Update Looga Instancing for the shared adaptive-quality contract.

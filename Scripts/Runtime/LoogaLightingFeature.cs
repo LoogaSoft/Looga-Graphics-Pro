@@ -4,7 +4,6 @@ using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
 using UnityEngine.Scripting.APIUpdating;
 using System.Reflection;
-using LoogaSoft.Tonemapper.Runtime;
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
@@ -99,16 +98,13 @@ namespace LoogaSoft.Lighting
         public bool enableBacklighting = true;
         [InspectorName("Backlighting Intensity"), Range(0.0f, 2.0f)]
         public float backlightingIntensity = 1.0f;
-        [HideInInspector] public Shader tonemapperShader;
         [HideInInspector] public Shader masterDeferredShader;
 
         private Material _activeLightingMaterial;
         private int _activeLightingMaterialModel = int.MinValue;
         private Material _ssssMaterial;
-        private Material _tonemapperMaterial;
 
         private CustomLightingPass _customLightingPass;
-        private LoogaTonemapperPass _tonemapperPass;
 
         private static readonly int GlobalLightingModelID = Shader.PropertyToID("_LoogaLightingModel");
         private static readonly int AdditionalLightAttenuationCountID =
@@ -156,7 +152,6 @@ namespace LoogaSoft.Lighting
         private static readonly int ProfileEdgeOcclusionEndID = Shader.PropertyToID("_LoogaProfileEdgeOcclusionEnd");
         private static readonly LoogaLightingModelSettings DefaultProfileSettings =
             new LoogaLightingModelSettings();
-        private const string TonemapperShaderPath = "Hidden/LoogaSoft/Tonemapper";
 
         #if UNITY_EDITOR
         private void OnValidate()
@@ -175,7 +170,6 @@ namespace LoogaSoft.Lighting
                 needsSave = true;
             }
 
-            if (tonemapperShader == null) AssignShader(ref tonemapperShader, "Looga Tonemapper", ref needsSave);
             Shader specializedShader = FindProjectMasterDeferredShader(activeLightingModel);
             if (specializedShader != null && masterDeferredShader != specializedShader)
             {
@@ -191,17 +185,6 @@ namespace LoogaSoft.Lighting
             }
 
             if (needsSave) EditorUtility.SetDirty(this);
-        }
-
-        private void AssignShader(ref Shader shader, string shaderName, ref bool needsSave)
-        {
-            string[] guids = AssetDatabase.FindAssets($"{shaderName} t:Shader");
-            if (guids.Length > 0)
-            {
-                string path = AssetDatabase.GUIDToAssetPath(guids[0]);
-                shader = AssetDatabase.LoadAssetAtPath<Shader>(path);
-                needsSave = true;
-            }
         }
         #endif
 
@@ -386,33 +369,6 @@ namespace LoogaSoft.Lighting
             Shader.SetGlobalFloat(ProfileEdgeOcclusionEndID, settings.edgeOcclusionEnd);
         }
 
-        private void UpdateTonemapperState()
-        {
-            if (tonemapperShader == null)
-                tonemapperShader = Shader.Find(TonemapperShaderPath);
-
-            if (tonemapperShader == null)
-                return;
-
-            if (_tonemapperMaterial == null || _tonemapperMaterial.shader != tonemapperShader)
-            {
-                if (_tonemapperMaterial != null) CoreUtils.Destroy(_tonemapperMaterial);
-                _tonemapperMaterial = CoreUtils.CreateEngineMaterial(tonemapperShader);
-            }
-
-            if (_tonemapperPass == null)
-            {
-                _tonemapperPass = new LoogaTonemapperPass(_tonemapperMaterial)
-                {
-                    renderPassEvent = RenderPassEvent.AfterRenderingPostProcessing
-                };
-            }
-            else
-            {
-                _tonemapperPass.UpdateMaterial(_tonemapperMaterial);
-            }
-        }
-
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
             LoogaIndirectLightingController.EnsureGlobalsAreValid();
@@ -425,8 +381,6 @@ namespace LoogaSoft.Lighting
             if (!IsDeferredPlusRenderer(renderer))
             {
                 Shader.SetGlobalInteger(AdditionalLightAttenuationCountID, 0);
-                if (renderingData.cameraData.postProcessEnabled)
-                    EnqueueTonemapper(renderer);
                 return;
             }
 
@@ -435,21 +389,6 @@ namespace LoogaSoft.Lighting
                 _customLightingPass.SetRenderer(renderer);
                 renderer.EnqueuePass(_customLightingPass);
             }
-
-            if (renderingData.cameraData.postProcessEnabled)
-                EnqueueTonemapper(renderer);
-        }
-
-        private void EnqueueTonemapper(ScriptableRenderer renderer)
-        {
-            var tonemapper = VolumeManager.instance.stack?.GetComponent<LoogaTonemapper>();
-            if (tonemapper == null || !tonemapper.IsActive())
-                return;
-
-            UpdateTonemapperState();
-
-            if (_tonemapperPass != null && _tonemapperMaterial != null)
-                renderer.EnqueuePass(_tonemapperPass);
         }
 
         protected override void Dispose(bool disposing)
@@ -460,10 +399,8 @@ namespace LoogaSoft.Lighting
             Shader.SetGlobalInteger(AdditionalLightAttenuationCountID, 0);
             if (_activeLightingMaterial != null) CoreUtils.Destroy(_activeLightingMaterial);
             if (_ssssMaterial != null) CoreUtils.Destroy(_ssssMaterial);
-            if (_tonemapperMaterial != null) CoreUtils.Destroy(_tonemapperMaterial);
 
             _customLightingPass = null;
-            _tonemapperPass = null;
             base.Dispose(disposing);
         }
 
