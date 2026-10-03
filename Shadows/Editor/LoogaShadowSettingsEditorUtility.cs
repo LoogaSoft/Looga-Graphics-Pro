@@ -14,6 +14,7 @@ namespace LoogaSoft.Shadows.Editor
             {
                 DrawProperty(serializedObject, rootPath, "_quality", "Quality");
                 DrawProperty(serializedObject, rootPath, "_renderSceneView", "Render Scene View");
+                DrawProperty(serializedObject, rootPath, "_cachedLevels", "Cached Levels");
             });
 
             DrawSection("Soft Shadows", preferencePrefix + ".SoftShadows", true, () =>

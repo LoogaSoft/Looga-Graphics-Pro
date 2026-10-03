@@ -1,3 +1,4 @@
+using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -27,9 +28,43 @@ namespace LoogaSoft.Shadows
 
         private const string FeatureName = "Looga Shadows";
         private const string ShaderName = "Hidden/LoogaSoft/Shadows/VirtualShadowResolve";
+        private const string CasterCacheShaderName = "Hidden/LoogaSoft/Shadows/CasterCache";
         private const string CopyDepthShaderName = "Hidden/Universal Render Pipeline/CopyDepth";
         private const int MaximumClipmapCount = 4;
+
+        // Each cached level redraws at most two exposed strips per frame, each culled by its own split.
+        private const int MaximumCachedLevels = 2;
+        private const int MaximumStaticSplits = MaximumCachedLevels * LoogaShadowCasterCache.MaximumExposedRects;
+
+        // Re-culling additional lights repeats URP's splits: one per spot light, one per cube face.
+        // URP widens point-light faces by a guard angle chosen from its internal atlas slice size;
+        // this is its largest angle for slices of 64 texels and up, which keeps a superset of casters.
+        private const int PointLightShadowSplitCount = 6;
+        private const float PointLightCullingFovBias = 12.7f;
+
+        // Texels at the tile border that the resolve shader never samples (matches the shader guard).
+        private const float ClipmapGuardTexels = 1.5f;
+        private const int FrustumFitIterations = 20;
+
+        // The finest level is sized so its texels are this fraction of a screen pixel at the
+        // nearest visible receiver. Below one, low sun angles still resolve: the light stretches
+        // a texel across the ground by 1 / sin(elevation).
+        private const float ShadowTexelsPerScreenPixel = 0.5f;
+
+        // Fits start slightly in front of the measured nearest receiver, which is a frame old.
+        private const float ReceiverSliceStartScale = 0.9f;
+
+        private const string ReceiverBoundsShaderPath =
+            "Packages/com.loogasoft.loogagraphicspro/Shadows/Runtime/Shaders/LoogaReceiverDepthBounds.compute";
         private const int RendererSettingsVersion = 1;
+
+        // URP soft-shadow parity. Smaller values let surfaces near the
+        // light grazing angle shadow themselves.
+        private const float CasterNormalBiasTexels = 3.5f;
+
+        // Hardware slope-scaled bias for shadow casters. Lower values leave faint
+        // self-shadow stripes on surfaces that the light reaches at a grazing angle.
+        private const float CasterSlopeBias = 6f;
 
         [SerializeField]
         private LoogaShadowSettings _settings = LoogaShadowSettings.Default;
@@ -48,15 +83,50 @@ namespace LoogaSoft.Shadows
         [SerializeField, HideInInspector]
         private Shader _resolveShader;
 
+        [SerializeField, HideInInspector]
+        private ComputeShader _receiverBoundsShader;
+
+        [SerializeField, HideInInspector]
+        private Shader _casterCacheShader;
+
         private readonly Matrix4x4[] _worldToShadow = new Matrix4x4[MaximumClipmapCount];
         private readonly Matrix4x4[] _viewMatrices = new Matrix4x4[MaximumClipmapCount];
         private readonly Matrix4x4[] _projectionMatrices = new Matrix4x4[MaximumClipmapCount];
         private readonly Vector4[] _clipmapCenters = new Vector4[MaximumClipmapCount];
         private readonly Vector4[] _clipmapRadii = new Vector4[MaximumClipmapCount];
         private readonly Vector4[] _clipmapRects = new Vector4[MaximumClipmapCount];
+        private readonly ShadowSplitData[] _clipmapSplits = new ShadowSplitData[MaximumClipmapCount];
+        private readonly Plane[] _cameraFrustumPlanes = new Plane[6];
+        private readonly Plane[] _splitPlanes = new Plane[ShadowSplitData.maximumCullingPlaneCount];
+        private readonly Vector3[] _frustumCorners = new Vector3[4];
+        private readonly Vector3[] _nearSliceCorners = new Vector3[4];
 
         private Material _resolveMaterial;
         private Texture2D _blueNoiseTexture;
+        private LoogaShadowReceiverBounds _receiverBounds;
+
+        // Cached coarse levels: this frame's mode and cache entry per level, and the culling splits that
+        // redraw static casters into the caches, after the level splits. Each split covers one exposed rect.
+        private Material _casterCacheMaterial;
+        private LoogaShadowCasterCache _casterCache;
+        private readonly LoogaCachedLevelMode[] _levelModes = new LoogaCachedLevelMode[MaximumClipmapCount];
+        private readonly LoogaShadowCasterCache.Level[] _cachedLevels =
+            new LoogaShadowCasterCache.Level[MaximumClipmapCount];
+        private readonly ShadowSplitData[] _staticSplits = new ShadowSplitData[MaximumStaticSplits];
+        private readonly int[] _staticSplitLevels = new int[MaximumStaticSplits];
+        private readonly RectInt[] _staticSplitRects = new RectInt[MaximumStaticSplits];
+        private int _staticSplitCount;
+
+        // The camera whose culling shadow distance OnCameraPreCull raised, and URP's own value.
+        private Camera _raisedShadowDistanceCamera;
+        private float _urpMaxShadowDistance;
+
+        // The URP asset whose cascade count OnCameraPreCull lowered, and its own count.
+        private UniversalRenderPipelineAsset _reducedCascadeAsset;
+        private int _urpShadowCascadeCount;
+
+        // The light whose instanced shadow culls OnCameraPreCull suspended for URP's cull.
+        private Light _ignoredInstanceCullLight;
         private ClipmapAtlasPass _atlasPass;
         private ResolvePass _resolvePass;
         private TransparentShadowReceiverPass _transparentShadowReceiverPass;
@@ -87,6 +157,16 @@ namespace LoogaSoft.Shadows
 
         public LoogaShadowSettings Settings => _settings;
 
+        /// <summary>
+        /// Redraws the cached static shadow casters of every camera's coarse levels. Call this after static shadow
+        /// casters change at runtime: renderers marked Static Shadow Caster that move, appear or disappear. Scene
+        /// loads, editor changes and Looga Instancing changes invalidate the caches without a call.
+        /// </summary>
+        public static void InvalidateCachedShadows()
+        {
+            LoogaShadowCasterCache.Invalidate();
+        }
+
         public override void Create()
         {
             MigrateLegacySettings();
@@ -97,14 +177,62 @@ namespace LoogaSoft.Shadows
             _resolvePass ??= new ResolvePass();
             _transparentShadowReceiverPass ??= new TransparentShadowReceiverPass();
             _debugOverlayPass ??= new DebugOverlayPass();
+            _receiverBounds ??= new LoogaShadowReceiverBounds();
+            _casterCache ??= new LoogaShadowCasterCache(MaximumClipmapCount);
+            EnsureReceiverBoundsShader();
+            _receiverBounds.SetShader(_receiverBoundsShader);
 
             _atlasPass.renderPassEvent = (RenderPassEvent)((int)RenderPassEvent.BeforeRenderingShadows + 1);
             _transparentShadowReceiverPass.renderPassEvent = RenderPassEvent.BeforeRenderingTransparents;
             _debugOverlayPass.renderPassEvent = RenderPassEvent.AfterRenderingOpaques;
         }
 
+        public override void OnCameraPreCull(ScriptableRenderer renderer, in CameraData cameraData)
+        {
+            _raisedShadowDistanceCamera = null;
+            RestoreUrpShadowCascades();
+            Camera camera = cameraData.camera;
+            if (camera == null)
+                return;
+
+            // The main light is not known before culling. URP prefers RenderSettings.sun.
+            LoogaShadowLightRegistry.TryGet(RenderSettings.sun, out LoogaShadowLight shadowLight);
+            LoogaShadowResolvedSettings settings = LoogaShadowResolvedSettings.Resolve(
+                _settings,
+                shadowLight);
+            if (!ShouldRenderCamera(camera, settings.RenderSceneView) || !EnsureMaterial())
+                return;
+
+            // URP culls shadow casters for every cascade of its main-light shadow map before
+            // AddRenderPasses can turn that map off, and Looga then culls its own levels, which
+            // replaces URP's result. Cull a single cascade for URP until AddRenderPasses restores
+            // the asset. With GPU Resident Drawer, each cascade is a culling job over every instance.
+            ReduceUrpShadowCascades();
+            // Looga Instancing runs a compute cull for every shadow cull. Skip URP's, which nothing draws.
+            if (RenderSettings.sun != null)
+            {
+                _ignoredInstanceCullLight = RenderSettings.sun;
+                LoogaSoft.Instancing.InstanceShadowSplits.IgnoreCulls(_ignoredInstanceCullLight);
+            }
+
+            // The engine drops shadow casters beyond the culling shadow distance, which URP takes
+            // from its asset. Raise it to the Looga shadow distance for the cull. AddRenderPasses
+            // restores URP's value before URP's shadow passes read it, so additional-light shadows
+            // keep their own range and fade.
+            ref float maxShadowDistance = ref cameraData.maxShadowDistance;
+            float shadowDistance = Mathf.Min(settings.ShadowDistance, camera.farClipPlane);
+            if (maxShadowDistance <= 0f || shadowDistance <= maxShadowDistance)
+                return;
+
+            _urpMaxShadowDistance = maxShadowDistance;
+            _raisedShadowDistanceCamera = camera;
+            maxShadowDistance = shadowDistance;
+        }
+
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
+            RestoreUrpShadowDistance(ref renderingData);
+            RestoreUrpShadowCascades();
             if (!isActive || !EnsureMaterial())
                 return;
 
@@ -139,19 +267,38 @@ namespace LoogaSoft.Shadows
                 _projectionMatrices,
                 _clipmapCenters,
                 _clipmapRadii,
-                _clipmapRects);
+                _clipmapRects,
+                _clipmapSplits);
+            _atlasPass.SetupCache(
+                _casterCacheMaterial,
+                _levelModes,
+                _cachedLevels,
+                _staticSplits,
+                _staticSplitLevels,
+                _staticSplitRects,
+                _staticSplitCount);
+
+            float softShadowQuality = GetSoftShadowQuality(
+                mainLight,
+                renderingData.shadowData.supportsSoftShadows);
+            Vector4 mainLightShadowParams = GetMainLightShadowParams(
+                mainLight.shadowStrength,
+                softShadowQuality,
+                settings.ShadowDistance);
 
             _resolvePass.renderPassEvent = usesDeferredLighting
                 ? (RenderPassEvent)((int)RenderPassEvent.AfterRenderingGbuffer + 1)
                 : (RenderPassEvent)((int)RenderPassEvent.AfterRenderingPrePasses + 1);
             _resolvePass.Setup(
                 _resolveMaterial,
+                _receiverBounds,
                 settings,
                 _worldToShadow,
                 _clipmapCenters,
                 _clipmapRadii,
                 _clipmapRects,
                 -mainLight.transform.forward,
+                mainLightShadowParams,
                 usesDeferredLighting,
                 usesAccurateGBufferNormals);
             _transparentShadowReceiverPass.Setup(
@@ -159,11 +306,17 @@ namespace LoogaSoft.Shadows
                 _worldToShadow,
                 _clipmapCenters,
                 _clipmapRadii,
-                mainLight);
+                mainLightShadowParams);
 
             renderer.EnqueuePass(_atlasPass);
             renderer.EnqueuePass(_resolvePass);
             renderer.EnqueuePass(_transparentShadowReceiverPass);
+
+            // Looga renders the main light's shadows, so URP's own cascaded shadow map would be drawn
+            // for nothing. Without main-light shadow support URP's pass binds an empty shadow map and
+            // default parameters instead; the passes above replace those. URP has already culled its
+            // shadow map by now, as one cascade (see OnCameraPreCull).
+            renderingData.shadowData.supportsMainLightShadows = false;
 
             if (settings.DebugView != LoogaShadowDebugView.Off)
             {
@@ -194,10 +347,17 @@ namespace LoogaSoft.Shadows
 
         protected override void Dispose(bool disposing)
         {
+            RestoreUrpShadowCascades();
             Shader.SetGlobalInteger(LoogaShadowShaderIds.ShadowsEnabled, 0);
             _atlasPass?.Dispose();
+            _receiverBounds?.Dispose();
+            _receiverBounds = null;
+            _casterCache?.Dispose();
+            _casterCache = null;
             CoreUtils.Destroy(_resolveMaterial);
             _resolveMaterial = null;
+            CoreUtils.Destroy(_casterCacheMaterial);
+            _casterCacheMaterial = null;
             _blueNoiseTexture = null;
             LoogaShadowRuntimeDiagnostics.Reset();
             base.Dispose(disposing);
@@ -252,6 +412,74 @@ namespace LoogaSoft.Shadows
 
             EnsureBlueNoiseTexture();
             return true;
+        }
+
+        // Without the shader, every level is drawn uncached.
+        private bool EnsureCasterCacheMaterial()
+        {
+            if (_casterCacheMaterial != null)
+                return true;
+
+            if (_casterCacheShader == null)
+                _casterCacheShader = Shader.Find(CasterCacheShaderName);
+
+            if (_casterCacheShader == null)
+                return false;
+
+            _casterCacheMaterial = CoreUtils.CreateEngineMaterial(_casterCacheShader);
+            return _casterCacheMaterial != null;
+        }
+
+        private void RestoreUrpShadowDistance(ref RenderingData renderingData)
+        {
+            if (_raisedShadowDistanceCamera == null)
+                return;
+
+            if (_raisedShadowDistanceCamera == renderingData.cameraData.camera)
+                renderingData.cameraData.maxShadowDistance = _urpMaxShadowDistance;
+
+            _raisedShadowDistanceCamera = null;
+        }
+
+        private void ReduceUrpShadowCascades()
+        {
+            UniversalRenderPipelineAsset asset = UniversalRenderPipeline.asset;
+            if (asset == null || asset.shadowCascadeCount <= 1)
+                return;
+
+            _reducedCascadeAsset = asset;
+            _urpShadowCascadeCount = asset.shadowCascadeCount;
+            asset.shadowCascadeCount = 1;
+        }
+
+        // The asset is shared and serialized, so the count is put back within the same camera
+        // render, and again on the next cull or on dispose if a render stopped early.
+        private void RestoreUrpShadowCascades()
+        {
+            if (_ignoredInstanceCullLight != null)
+                LoogaSoft.Instancing.InstanceShadowSplits.ResumeCulls(_ignoredInstanceCullLight);
+            _ignoredInstanceCullLight = null;
+
+            if (_reducedCascadeAsset == null)
+                return;
+
+            _reducedCascadeAsset.shadowCascadeCount = _urpShadowCascadeCount;
+            _reducedCascadeAsset = null;
+        }
+
+        private void EnsureReceiverBoundsShader()
+        {
+#if UNITY_EDITOR
+            // Compute shaders have no Shader.Find, so the renderer asset keeps a reference
+            // that player builds include.
+            if (_receiverBoundsShader != null)
+                return;
+
+            _receiverBoundsShader = UnityEditor.AssetDatabase.LoadAssetAtPath<ComputeShader>(
+                ReceiverBoundsShaderPath);
+            if (_receiverBoundsShader != null)
+                UnityEditor.EditorUtility.SetDirty(this);
+#endif
         }
 
         private void EnsureBlueNoiseTexture()
@@ -351,12 +579,35 @@ namespace LoogaSoft.Shadows
             Matrix4x4 lightWorldToLocal = Matrix4x4.Rotate(Quaternion.Inverse(lightRotation));
             Matrix4x4 lightLocalToWorld = Matrix4x4.Rotate(lightRotation);
 
-            Vector3 cameraForward = Vector3.ProjectOnPlane(camera.transform.forward, lightDirection).normalized;
-            if (cameraForward.sqrMagnitude < 0.01f)
-                cameraForward = Vector3.ProjectOnPlane(camera.transform.up, lightDirection).normalized;
+            float baseRadius = GetBaseClipmapRadius(
+                camera,
+                settings,
+                out float nearDistance);
+            float farDistance = Mathf.Max(
+                Mathf.Min(settings.ShadowDistance, camera.farClipPlane),
+                nearDistance);
+            GetLightSpaceFrustumCorners(camera, nearDistance, lightWorldToLocal, _nearSliceCorners);
+
+            // Visible receivers lie inside the view frustum up to the shadow distance.
+            GeometryUtility.CalculateFrustumPlanes(camera, _cameraFrustumPlanes);
+            Transform cameraTransform = camera.transform;
+            _cameraFrustumPlanes[5] = new Plane(
+                -cameraTransform.forward,
+                cameraTransform.position + cameraTransform.forward * farDistance);
+            Vector2 previousCenter = Vector2.zero;
+            float previousRadius = 0f;
+            _staticSplitCount = 0;
+            bool canCache = _casterCache != null && !camera.stereoEnabled && EnsureCasterCacheMaterial();
+            _casterCache?.RemoveDestroyedCameras();
 
             for (int level = 0; level < MaximumClipmapCount; level++)
             {
+                bool cached = canCache && level < settings.ClipmapCount && settings.IsCachedLevel(level);
+                _levelModes[level] = LoogaCachedLevelMode.Uncached;
+                _cachedLevels[level] = null;
+                if (!cached)
+                    _casterCache?.ReleaseLevel(camera, level);
+
                 if (level >= settings.ClipmapCount)
                 {
                     _worldToShadow[level] = Matrix4x4.zero;
@@ -365,6 +616,7 @@ namespace LoogaSoft.Shadows
                     _clipmapCenters[level] = Vector4.zero;
                     _clipmapRadii[level] = Vector4.zero;
                     _clipmapRects[level] = Vector4.zero;
+                    _clipmapSplits[level] = default;
                     continue;
                 }
 
@@ -372,17 +624,60 @@ namespace LoogaSoft.Shadows
                     ? level / (settings.ClipmapCount - 1f)
                     : 0f;
                 float coverageRatio = Mathf.Max(
-                    settings.ShadowDistance / settings.NearClipmapRadius,
+                    settings.ShadowDistance / baseRadius,
                     1f);
-                float radius = settings.NearClipmapRadius * Mathf.Pow(coverageRatio, clipmapT);
-                Vector3 desiredCenter = camera.transform.position + cameraForward * radius * 0.35f;
-                Vector3 lightSpaceCenter = lightWorldToLocal.MultiplyPoint3x4(desiredCenter);
+                float radius = baseRadius * Mathf.Pow(coverageRatio, clipmapT);
                 int clipmapResolution = settings.TileResolution;
                 float worldTexelSize = radius * 2f / clipmapResolution;
 
+                // The resolve shader hands receivers in the outer guard and blend band to the next
+                // level (LoogaClipmapEdgeBlend), so only the inner square serves this level alone.
+                float handoffLocal = ClipmapGuardTexels / clipmapResolution +
+                    (level + 1 < settings.ClipmapCount ? settings.ClipmapBlend : 0f);
+                float usableHalfExtent = radius * Mathf.Max(1f - 2f * handoffLocal, 0.25f);
+
+                // Centre the level on the longest slice of the view frustum that fits its usable
+                // square, the way cascades are fitted, so the texels land where the camera looks.
+                FitFrustumSlice(
+                    camera,
+                    lightWorldToLocal,
+                    nearDistance,
+                    farDistance,
+                    usableHalfExtent,
+                    out Vector3 sliceMin,
+                    out Vector3 sliceMax);
+                Vector3 lightSpaceCenter = (sliceMin + sliceMax) * 0.5f;
+
+                // Keep the previous level inside this level's usable square, so its handoff band
+                // always blends into valid texels here.
+                if (level > 0)
+                {
+                    float slack = Mathf.Max(usableHalfExtent - previousRadius - worldTexelSize, 0f);
+                    lightSpaceCenter.x = previousCenter.x +
+                        Mathf.Clamp(lightSpaceCenter.x - previousCenter.x, -slack, slack);
+                    lightSpaceCenter.y = previousCenter.y +
+                        Mathf.Clamp(lightSpaceCenter.y - previousCenter.y, -slack, slack);
+                }
+
                 // Quantized origins keep texels stationary under sub-texel camera motion.
-                lightSpaceCenter.x = Mathf.Floor(lightSpaceCenter.x / worldTexelSize) * worldTexelSize;
-                lightSpaceCenter.y = Mathf.Floor(lightSpaceCenter.y / worldTexelSize) * worldTexelSize;
+                float centerTexelX = Mathf.Floor(lightSpaceCenter.x / worldTexelSize);
+                float centerTexelY = Mathf.Floor(lightSpaceCenter.y / worldTexelSize);
+                lightSpaceCenter.x = centerTexelX * worldTexelSize;
+                lightSpaceCenter.y = centerTexelY * worldTexelSize;
+                previousCenter = new Vector2(lightSpaceCenter.x, lightSpaceCenter.y);
+                previousRadius = radius;
+
+                // A cached level's depth values depend on the depth of its centre along the light.
+                if (cached)
+                {
+                    lightSpaceCenter.z = _casterCache.HoldLightDepth(
+                        camera,
+                        level,
+                        lightRotation,
+                        lightSpaceCenter.z,
+                        settings.DepthRange);
+                }
+
                 Vector3 center = lightLocalToWorld.MultiplyPoint3x4(lightSpaceCenter);
                 Vector3 eye = center - lightDirection * settings.DepthRange * 0.5f;
 
@@ -410,7 +705,330 @@ namespace LoogaSoft.Shadows
                     1f / worldTexelSize,
                     1f / clipmapResolution);
                 _clipmapRects[level] = Vector4.zero;
+                _clipmapSplits[level] = CreateBoxSplit(
+                    center,
+                    radius,
+                    radius,
+                    lightRotation,
+                    lightDirection,
+                    settings.DepthRange,
+                    Mathf.Min(settings.MaximumPenumbra, radius * 0.45f),
+                    projection * view,
+                    true);
+
+                if (cached)
+                {
+                    PlanCachedLevel(
+                        camera,
+                        light,
+                        level,
+                        settings,
+                        lightRotation,
+                        lightDirection,
+                        lightSpaceCenter.z,
+                        new Vector2Int(
+                            (int)centerTexelX - clipmapResolution / 2,
+                            (int)centerTexelY - clipmapResolution / 2),
+                        center,
+                        radius,
+                        worldTexelSize,
+                        projection * view);
+                }
             }
+        }
+
+        // Decides how a cached level is drawn this frame, and adds a static-caster split for each rect of the
+        // level that its cache must redraw.
+        private void PlanCachedLevel(
+            Camera camera,
+            Light light,
+            int level,
+            LoogaShadowResolvedSettings settings,
+            Quaternion lightRotation,
+            Vector3 lightDirection,
+            float lightDepth,
+            Vector2Int origin,
+            Vector3 center,
+            float radius,
+            float worldTexelSize,
+            Matrix4x4 viewProjection)
+        {
+            int resolution = settings.TileResolution;
+            LoogaShadowCasterCache.Key key = new(
+                light.GetInstanceID(),
+                lightRotation,
+                radius,
+                resolution,
+                settings.DepthRange,
+                lightDepth,
+                ClipmapAtlasPass.GetCasterShadowBias(worldTexelSize, settings));
+            _levelModes[level] = _casterCache.Plan(
+                camera,
+                level,
+                key,
+                lightRotation,
+                lightDepth,
+                origin,
+                resolution);
+            LoogaShadowCasterCache.Level entry = _casterCache.GetLevel(camera, level);
+            _cachedLevels[level] = entry;
+
+            Vector3 right = lightRotation * Vector3.right;
+            Vector3 up = lightRotation * Vector3.up;
+            for (int index = 0; index < entry.ExposedCount && _staticSplitCount < MaximumStaticSplits; index++)
+            {
+                // Cached casters must not depend on the view, which changes while they stay cached.
+                RectInt rect = entry.Exposed[index];
+                Vector3 rectCenter = center +
+                    right * ((rect.xMin + rect.xMax) * 0.5f * worldTexelSize - radius) +
+                    up * ((rect.yMin + rect.yMax) * 0.5f * worldTexelSize - radius);
+                _staticSplits[_staticSplitCount] = CreateBoxSplit(
+                    rectCenter,
+                    rect.width * 0.5f * worldTexelSize,
+                    rect.height * 0.5f * worldTexelSize,
+                    lightRotation,
+                    lightDirection,
+                    settings.DepthRange,
+                    0f,
+                    viewProjection,
+                    false);
+                _staticSplitLevels[_staticSplitCount] = level;
+                _staticSplitRects[_staticSplitCount] = rect;
+                _staticSplitCount++;
+            }
+        }
+
+        // One shadow-caster culling split per clipmap level, so the engine and every
+        // BatchRendererGroup cull casters against the levels that draw them. Cached levels add
+        // splits for the parts of the level their caches redraw, without the view bounds.
+        private ShadowSplitData CreateBoxSplit(
+            Vector3 center,
+            float halfWidth,
+            float halfHeight,
+            Quaternion lightRotation,
+            Vector3 lightDirection,
+            float depthRange,
+            float blockerSearchWorld,
+            Matrix4x4 viewProjection,
+            bool cullByView)
+        {
+            Vector3 right = lightRotation * Vector3.right;
+            Vector3 up = lightRotation * Vector3.up;
+            Vector3 far = center + lightDirection * depthRange * 0.5f;
+            int planeCount = 0;
+
+            // The box in light space. The side toward the light stays open: casters
+            // beyond the near plane are clamped onto it and still shadow the level.
+            _splitPlanes[planeCount++] = new Plane(right, center - right * halfWidth);
+            _splitPlanes[planeCount++] = new Plane(-right, center + right * halfWidth);
+            _splitPlanes[planeCount++] = new Plane(up, center - up * halfHeight);
+            _splitPlanes[planeCount++] = new Plane(-up, center + up * halfHeight);
+            _splitPlanes[planeCount++] = new Plane(-lightDirection, far);
+
+            // A caster matters only if its shadow reaches a visible receiver, that is, if moving
+            // along the light from it enters the view frustum. Each frustum plane that the light
+            // does not cross inward therefore bounds the casters too. The planes widen by the
+            // blocker search radius, because penumbrae of visible receivers sample that far.
+            for (int index = 0; cullByView && index < _cameraFrustumPlanes.Length; index++)
+            {
+                Plane plane = _cameraFrustumPlanes[index];
+                if (Vector3.Dot(plane.normal, lightDirection) > 0f)
+                    continue;
+
+                if (planeCount >= _splitPlanes.Length)
+                    break;
+
+                _splitPlanes[planeCount++] =
+                    new Plane(plane.normal, plane.distance + blockerSearchWorld);
+            }
+
+            ShadowSplitData split = default;
+            split.cullingPlaneCount = planeCount;
+            for (int index = 0; index < planeCount; index++)
+                split.SetCullingPlane(index, _splitPlanes[index]);
+
+            // Encloses the whole box, depth included. Cascade blend culling stays off: a caster
+            // inside a finer level can still shadow receivers that only this level covers.
+            float sphereRadius = Mathf.Sqrt(
+                halfWidth * halfWidth + halfHeight * halfHeight + 0.25f * depthRange * depthRange);
+            split.cullingSphere = new Vector4(center.x, center.y, center.z, sphereRadius);
+            split.shadowCascadeBlendCullingFactor = 0f;
+            split.cullingMatrix = viewProjection;
+            return split;
+        }
+
+        // Sizes the finest level for the nearest visible receiver. Its texels must resolve that
+        // receiver's screen pixels; a smaller level is wasted on space the camera cannot see, and
+        // a level too small to reach the receivers pushes them onto a much coarser one. Near
+        // Clipmap Radius is the floor, and the result snaps to half-octave steps so that texel
+        // sizes stay fixed while the camera moves. The fit start distance is where the frustum
+        // slices begin: the space between the camera and the first surface holds no receivers
+        // and would waste the fine levels.
+        private float GetBaseClipmapRadius(
+            Camera camera,
+            LoogaShadowResolvedSettings settings,
+            out float fitStartDistance)
+        {
+            fitStartDistance = Mathf.Max(camera.nearClipPlane, 0.0001f);
+            if (_receiverBounds == null)
+                return settings.NearClipmapRadius;
+
+            float pixelHeight = Mathf.Max(camera.pixelHeight, 1);
+            float radiusPerFootprint =
+                ShadowTexelsPerScreenPixel * settings.TileResolution * 0.5f;
+            float maximumStep = Mathf.Floor(2f * Mathf.Log(
+                Mathf.Max(settings.ShadowDistance / settings.NearClipmapRadius, 1f),
+                2f));
+            float idealRadius;
+            if (camera.orthographic)
+            {
+                idealRadius = 2f * camera.orthographicSize / pixelHeight * radiusPerFootprint;
+            }
+            else
+            {
+                float radiusPerDepth = 2f *
+                    Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad) / pixelHeight *
+                    radiusPerFootprint;
+                if (_receiverBounds.TryGetNearestReceiverDepth(camera, out float nearestReceiverDepth))
+                {
+                    idealRadius = nearestReceiverDepth * radiusPerDepth;
+                    fitStartDistance = Mathf.Max(
+                        fitStartDistance,
+                        nearestReceiverDepth * ReceiverSliceStartScale);
+                }
+                else
+                {
+                    idealRadius = settings.NearClipmapRadius;
+                }
+
+                _receiverBounds.RecordAllocation(
+                    camera,
+                    radiusPerDepth,
+                    settings.NearClipmapRadius,
+                    maximumStep,
+                    fitStartDistance);
+            }
+
+            int step = _receiverBounds.SelectRadiusStep(
+                camera,
+                LoogaShadowReceiverBounds.GetRadiusStep(
+                    idealRadius,
+                    settings.NearClipmapRadius,
+                    maximumStep));
+            return settings.NearClipmapRadius * Mathf.Pow(2f, step * 0.5f);
+        }
+
+        // Light-space bounds of a frustum slice grow with its far distance, so bisection finds the
+        // longest slice whose bounds fit inside a square of the given half extent.
+        private float FitFrustumSlice(
+            Camera camera,
+            Matrix4x4 lightWorldToLocal,
+            float nearDistance,
+            float farDistance,
+            float halfExtent,
+            out Vector3 sliceMin,
+            out Vector3 sliceMax)
+        {
+            if (TryGetFrustumSliceBounds(camera, lightWorldToLocal, farDistance, halfExtent, out sliceMin, out sliceMax))
+                return farDistance;
+
+            // The slice at the near plane is kept even when it does not fit, so the camera stays covered.
+            TryGetFrustumSliceBounds(camera, lightWorldToLocal, nearDistance, halfExtent, out sliceMin, out sliceMax);
+            float low = nearDistance;
+            float high = farDistance;
+            for (int iteration = 0; iteration < FrustumFitIterations; iteration++)
+            {
+                float middle = (low + high) * 0.5f;
+                if (TryGetFrustumSliceBounds(camera, lightWorldToLocal, middle, halfExtent, out Vector3 min, out Vector3 max))
+                {
+                    low = middle;
+                    sliceMin = min;
+                    sliceMax = max;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+
+            return low;
+        }
+
+        private bool TryGetFrustumSliceBounds(
+            Camera camera,
+            Matrix4x4 lightWorldToLocal,
+            float farDistance,
+            float halfExtent,
+            out Vector3 sliceMin,
+            out Vector3 sliceMax)
+        {
+            GetLightSpaceFrustumCorners(camera, farDistance, lightWorldToLocal, _frustumCorners);
+            sliceMin = Vector3.positiveInfinity;
+            sliceMax = Vector3.negativeInfinity;
+            for (int corner = 0; corner < 4; corner++)
+            {
+                sliceMin = Vector3.Min(sliceMin, Vector3.Min(_nearSliceCorners[corner], _frustumCorners[corner]));
+                sliceMax = Vector3.Max(sliceMax, Vector3.Max(_nearSliceCorners[corner], _frustumCorners[corner]));
+            }
+
+            return Mathf.Max(sliceMax.x - sliceMin.x, sliceMax.y - sliceMin.y) <= halfExtent * 2f;
+        }
+
+        private static void GetLightSpaceFrustumCorners(
+            Camera camera,
+            float distance,
+            Matrix4x4 lightWorldToLocal,
+            Vector3[] corners)
+        {
+            camera.CalculateFrustumCorners(
+                new Rect(0f, 0f, 1f, 1f),
+                distance,
+                Camera.MonoOrStereoscopicEye.Mono,
+                corners);
+            Transform cameraTransform = camera.transform;
+            for (int corner = 0; corner < 4; corner++)
+            {
+                corners[corner] = lightWorldToLocal.MultiplyPoint3x4(
+                    cameraTransform.TransformPoint(corners[corner]));
+            }
+        }
+
+        // URP's per-light soft-shadow quality (0 off, 1 low, 2 medium, 3 high), as its main-light
+        // pass encodes it in _MainLightShadowParams.y. Only transparent receivers sample it; opaque
+        // receivers read the resolved screen-space shadow. URP keeps the pipeline-wide quality
+        // internal, so lights that follow it use Low, as this pass always did.
+        private static float GetSoftShadowQuality(Light light, bool supportsSoftShadows)
+        {
+            if (light.shadows != LightShadows.Soft || !supportsSoftShadows)
+                return 0f;
+
+            SoftShadowQuality quality = SoftShadowQuality.Low;
+            if (light.TryGetComponent(out UniversalAdditionalLightData additionalLightData) &&
+                additionalLightData.softShadowQuality != SoftShadowQuality.UsePipelineSettings)
+            {
+                quality = additionalLightData.softShadowQuality;
+            }
+
+            return Mathf.Max((int)quality, (int)SoftShadowQuality.Low);
+        }
+
+        // URP's _MainLightShadowParams: strength, soft-shadow quality, and a fade over the last tenth
+        // of the shadow distance, evaluated on squared camera distance by GetMainLightShadowFade.
+        private static Vector4 GetMainLightShadowParams(
+            float shadowStrength,
+            float softShadowQuality,
+            float shadowDistance)
+        {
+            float shadowDistanceSquared = shadowDistance * shadowDistance;
+            float fadeStartSquared = shadowDistanceSquared * 0.81f;
+            float fadeRangeSquared = Mathf.Max(
+                shadowDistanceSquared - fadeStartSquared,
+                0.0001f);
+            return new Vector4(
+                shadowStrength,
+                softShadowQuality,
+                1f / fadeRangeSquared,
+                -fadeStartSquared / fadeRangeSquared);
         }
 
         private static Matrix4x4 GetAtlasShadowTransform(
@@ -466,6 +1084,20 @@ namespace LoogaSoft.Shadows
             private Vector4[] _clipmapCenters;
             private Vector4[] _clipmapRadii;
             private Vector4[] _clipmapRects;
+            private ShadowSplitData[] _clipmapSplits;
+            private Material _casterCacheMaterial;
+            private LoogaCachedLevelMode[] _levelModes;
+            private LoogaShadowCasterCache.Level[] _cachedLevels;
+            private ShadowSplitData[] _staticSplits;
+            private int[] _staticSplitLevels;
+            private RectInt[] _staticSplitRects;
+            private int _staticSplitCount;
+            private readonly TextureHandle[] _cacheHandles = new TextureHandle[MaximumClipmapCount];
+
+            private static readonly int CasterCacheId = Shader.PropertyToID("_LoogaShadowCasterCache");
+            private static readonly int CasterCacheOffsetId = Shader.PropertyToID("_LoogaShadowCasterCacheOffset");
+            private const int CacheClearShaderPass = 0;
+            private const int CacheUnwrapShaderPass = 1;
 
             public ClipmapAtlasPass()
             {
@@ -506,10 +1138,12 @@ namespace LoogaSoft.Shadows
 
             private sealed class PackedPassData
             {
-                public RendererListHandle RendererList0;
-                public RendererListHandle RendererList1;
-                public RendererListHandle RendererList2;
-                public RendererListHandle RendererList3;
+                public readonly RendererListHandle[] RendererLists =
+                    new RendererListHandle[MaximumClipmapCount];
+                public readonly RTHandle[] CacheTextures = new RTHandle[MaximumClipmapCount];
+                public readonly Vector4[] CacheOffsets = new Vector4[MaximumClipmapCount];
+                public Material CacheMaterial;
+                public MaterialPropertyBlock PropertyBlock;
                 public VisibleLight MainLight;
                 public LoogaShadowResolvedSettings Settings;
                 public Matrix4x4[] WorldToShadow;
@@ -520,18 +1154,6 @@ namespace LoogaSoft.Shadows
                 public Matrix4x4 CameraView;
                 public Matrix4x4 CameraProjection;
                 public Vector3 CameraPosition;
-
-                public RendererListHandle GetRendererList(int level)
-                {
-                    return level switch
-                    {
-                        0 => RendererList0,
-                        1 => RendererList1,
-                        2 => RendererList2,
-                        3 => RendererList3,
-                        _ => default
-                    };
-                }
             }
 
             private sealed class SeparatePassData
@@ -559,7 +1181,8 @@ namespace LoogaSoft.Shadows
                 Matrix4x4[] projectionMatrices,
                 Vector4[] clipmapCenters,
                 Vector4[] clipmapRadii,
-                Vector4[] clipmapRects)
+                Vector4[] clipmapRects,
+                ShadowSplitData[] clipmapSplits)
             {
                 _mainLightIndex = mainLightIndex;
                 _mainLight = mainLight;
@@ -570,6 +1193,31 @@ namespace LoogaSoft.Shadows
                 _clipmapCenters = clipmapCenters;
                 _clipmapRadii = clipmapRadii;
                 _clipmapRects = clipmapRects;
+                _clipmapSplits = clipmapSplits;
+            }
+
+            public void SetupCache(
+                Material casterCacheMaterial,
+                LoogaCachedLevelMode[] levelModes,
+                LoogaShadowCasterCache.Level[] cachedLevels,
+                ShadowSplitData[] staticSplits,
+                int[] staticSplitLevels,
+                RectInt[] staticSplitRects,
+                int staticSplitCount)
+            {
+                _casterCacheMaterial = casterCacheMaterial;
+                _levelModes = levelModes;
+                _cachedLevels = cachedLevels;
+                _staticSplits = staticSplits;
+                _staticSplitLevels = staticSplitLevels;
+                _staticSplitRects = staticSplitRects;
+                _staticSplitCount = staticSplitCount;
+            }
+
+            // True when the level draws its static casters from its cache and only its other casters itself.
+            private bool UsesCache(int level)
+            {
+                return _levelModes[level] != LoogaCachedLevelMode.Uncached && _cachedLevels[level] != null;
             }
 
             public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
@@ -593,6 +1241,10 @@ namespace LoogaSoft.Shadows
                 if (!shadowFrameData.HasShadowCasters)
                     return;
 
+                CullClipmapShadowCasters(
+                    frameData.Get<CullContextData>(),
+                    shadowCullResults,
+                    frameData.Get<UniversalShadowData>().supportsAdditionalLightShadows);
                 RecordPackedAtlas(
                     renderGraph,
                     frameData,
@@ -610,19 +1262,6 @@ namespace LoogaSoft.Shadows
                 LoogaShadowFrameData shadowFrameData,
                 bool useRawShadowDepth)
             {
-                RendererListHandle rendererList0 = CreateShadowRendererList(
-                    renderGraph,
-                    shadowCullResults);
-                RendererListHandle rendererList1 = _settings.ClipmapCount > 1
-                    ? CreateShadowRendererList(renderGraph, shadowCullResults)
-                    : default;
-                RendererListHandle rendererList2 = _settings.ClipmapCount > 2
-                    ? CreateShadowRendererList(renderGraph, shadowCullResults)
-                    : default;
-                RendererListHandle rendererList3 = _settings.ClipmapCount > 3
-                    ? CreateShadowRendererList(renderGraph, shadowCullResults)
-                    : default;
-
                 RenderTextureDescriptor descriptor = new(
                     _settings.AtlasResolution,
                     _settings.AtlasResolution,
@@ -661,14 +1300,37 @@ namespace LoogaSoft.Shadows
                     shadowFrameData.DepthClipmaps[level] = depthAtlas;
                 }
 
+                RecordCasterCaches(renderGraph, cameraData, shadowCullResults);
+
                 IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass(
                     "Looga Shadows Render Clipmaps",
                     out PackedPassData passData,
                     _profilingSampler);
-                passData.RendererList0 = rendererList0;
-                passData.RendererList1 = rendererList1;
-                passData.RendererList2 = rendererList2;
-                passData.RendererList3 = rendererList3;
+                passData.CacheMaterial = _casterCacheMaterial;
+                passData.PropertyBlock ??= new MaterialPropertyBlock();
+                for (int level = 0; level < _settings.ClipmapCount; level++)
+                {
+                    // A cached level takes its static casters from its cache and draws the others itself.
+                    bool usesCache = UsesCache(level);
+                    RendererListHandle rendererList = CreateShadowRendererList(
+                        renderGraph,
+                        shadowCullResults,
+                        level,
+                        usesCache ? ShadowObjectsFilter.DynamicOnly : ShadowObjectsFilter.AllObjects);
+                    passData.RendererLists[level] = rendererList;
+                    builder.UseRendererList(rendererList);
+                    passData.CacheTextures[level] = usesCache ? _cachedLevels[level].Texture : null;
+                    if (!usesCache)
+                        continue;
+
+                    builder.UseTexture(_cacheHandles[level], AccessFlags.Read);
+                    Vector2Int wrapOffset = _cachedLevels[level].WrapOffset;
+                    passData.CacheOffsets[level] = new Vector4(
+                        wrapOffset.x,
+                        wrapOffset.y,
+                        _settings.TileResolution,
+                        0f);
+                }
                 passData.MainLight = _mainLight;
                 passData.Settings = _settings;
                 passData.WorldToShadow = _worldToShadow;
@@ -680,13 +1342,6 @@ namespace LoogaSoft.Shadows
                 passData.CameraProjection = cameraData.GetProjectionMatrix();
                 passData.CameraPosition = cameraData.worldSpaceCameraPos;
 
-                builder.UseRendererList(rendererList0);
-                if (_settings.ClipmapCount > 1)
-                    builder.UseRendererList(rendererList1);
-                if (_settings.ClipmapCount > 2)
-                    builder.UseRendererList(rendererList2);
-                if (_settings.ClipmapCount > 3)
-                    builder.UseRendererList(rendererList3);
                 builder.SetRenderAttachmentDepth(atlas, AccessFlags.Write);
                 builder.AllowGlobalStateModification(true);
                 builder.SetRenderFunc(static (PackedPassData data, RasterGraphContext context) =>
@@ -697,7 +1352,7 @@ namespace LoogaSoft.Shadows
                     context.cmd.SetGlobalVector(LightDirection, new Vector4(direction.x, direction.y, direction.z, 0f));
                     context.cmd.SetGlobalVector(LightPosition, new Vector4(-direction.x, -direction.y, -direction.z, 0f));
                     context.cmd.SetKeyword(LoogaShadowShaderIds.CastingPunctualLightShadow, false);
-                    context.cmd.SetGlobalDepthBias(1f, 2.5f);
+                    context.cmd.SetGlobalDepthBias(1f, CasterSlopeBias);
                     for (int level = 0; level < data.Settings.ClipmapCount; level++)
                     {
                         int tileX = level & 1;
@@ -715,7 +1370,23 @@ namespace LoogaSoft.Shadows
                         context.cmd.SetViewProjectionMatrices(
                             data.ViewMatrices[level],
                             data.ProjectionMatrices[level]);
-                        context.cmd.DrawRendererList(data.GetRendererList(level));
+                        if (data.CacheTextures[level] != null)
+                        {
+                            // Writes stored depths, which already carry the caster bias.
+                            context.cmd.SetGlobalDepthBias(0f, 0f);
+                            data.PropertyBlock.SetTexture(CasterCacheId, data.CacheTextures[level]);
+                            data.PropertyBlock.SetVector(CasterCacheOffsetId, data.CacheOffsets[level]);
+                            context.cmd.DrawProcedural(
+                                Matrix4x4.identity,
+                                data.CacheMaterial,
+                                CacheUnwrapShaderPass,
+                                MeshTopology.Triangles,
+                                3,
+                                1,
+                                data.PropertyBlock);
+                            context.cmd.SetGlobalDepthBias(1f, CasterSlopeBias);
+                        }
+                        context.cmd.DrawRendererList(data.RendererLists[level]);
                     }
                     context.cmd.SetGlobalDepthBias(0f, 0f);
                     context.cmd.SetViewProjectionMatrices(data.CameraView, data.CameraProjection);
@@ -742,6 +1413,158 @@ namespace LoogaSoft.Shadows
                         depthAtlas,
                         atlas,
                         passName: "Looga Shadows Copy Raw Depth");
+                }
+            }
+
+            private sealed class CachePassData
+            {
+                // A rect of a level crosses the cache's wrap seams in at most two places, so it draws in up to
+                // four pieces, each with the projection of its part of the level. A renderer list executes once,
+                // so each piece has its own list of the rect's split.
+                public const int MaximumPieces = LoogaShadowCasterCache.MaximumExposedRects * 4;
+                public readonly RendererListHandle[] RendererLists = new RendererListHandle[MaximumPieces];
+                public readonly Rect[] Viewports = new Rect[MaximumPieces];
+                public readonly Matrix4x4[] Projections = new Matrix4x4[MaximumPieces];
+                public int PieceCount;
+                public Matrix4x4 View;
+                public Vector4 ShadowBias;
+                public Material Material;
+                public Vector3 LightDirection;
+                public Vector3 CameraPosition;
+                public Matrix4x4 CameraView;
+                public Matrix4x4 CameraProjection;
+            }
+
+            // Redraws the exposed rects of each cached level into its cache, and marks what the caches hold.
+            private void RecordCasterCaches(
+                RenderGraph renderGraph,
+                UniversalCameraData cameraData,
+                CullingResults shadowCullResults)
+            {
+                for (int level = 0; level < MaximumClipmapCount; level++)
+                {
+                    _cacheHandles[level] = TextureHandle.nullHandle;
+                    if (level >= _settings.ClipmapCount || !UsesCache(level))
+                        continue;
+
+                    LoogaShadowCasterCache.Level entry = _cachedLevels[level];
+                    _cacheHandles[level] = renderGraph.ImportTexture(entry.Texture);
+                    if (entry.Mode == LoogaCachedLevelMode.Reuse)
+                    {
+                        LoogaShadowCasterCache.Commit(entry);
+                        continue;
+                    }
+
+                    using IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass(
+                        "Looga Shadows Cache Static Casters",
+                        out CachePassData passData,
+                        _profilingSampler);
+                    int resolution = _settings.TileResolution;
+                    float radius = _clipmapRadii[level].x;
+                    passData.PieceCount = 0;
+                    for (int split = 0; split < _staticSplitCount; split++)
+                    {
+                        if (_staticSplitLevels[split] != level)
+                            continue;
+
+                        int firstPiece = passData.PieceCount;
+                        AddCachePieces(
+                            passData,
+                            _staticSplitRects[split],
+                            entry.WrapOffset,
+                            resolution,
+                            radius,
+                            _settings.DepthRange);
+                        for (int piece = firstPiece; piece < passData.PieceCount; piece++)
+                        {
+                            RendererListHandle rendererList = CreateShadowRendererList(
+                                renderGraph,
+                                shadowCullResults,
+                                _settings.ClipmapCount + split,
+                                ShadowObjectsFilter.StaticOnly);
+                            builder.UseRendererList(rendererList);
+                            passData.RendererLists[piece] = rendererList;
+                        }
+                    }
+
+                    passData.View = _viewMatrices[level];
+                    passData.ShadowBias = GetCasterShadowBias(_clipmapRadii[level].y, _settings);
+                    passData.Material = _casterCacheMaterial;
+                    passData.LightDirection = -_mainLight.light.transform.forward.normalized;
+                    passData.CameraPosition = cameraData.worldSpaceCameraPos;
+                    passData.CameraView = cameraData.GetViewMatrix();
+                    passData.CameraProjection = cameraData.GetProjectionMatrix();
+                    builder.SetRenderAttachmentDepth(_cacheHandles[level], AccessFlags.ReadWrite);
+                    builder.AllowGlobalStateModification(true);
+                    builder.SetRenderFunc(static (CachePassData data, RasterGraphContext context) =>
+                    {
+                        Vector3 direction = data.LightDirection;
+                        context.cmd.SetGlobalVector(WorldSpaceCameraPosition, data.CameraPosition);
+                        context.cmd.SetGlobalVector(LightDirection, new Vector4(direction.x, direction.y, direction.z, 0f));
+                        context.cmd.SetGlobalVector(LightPosition, new Vector4(-direction.x, -direction.y, -direction.z, 0f));
+                        context.cmd.SetKeyword(LoogaShadowShaderIds.CastingPunctualLightShadow, false);
+                        context.cmd.SetGlobalVector(ShadowBias, data.ShadowBias);
+                        for (int piece = 0; piece < data.PieceCount; piece++)
+                        {
+                            context.cmd.SetViewport(data.Viewports[piece]);
+                            context.cmd.SetGlobalDepthBias(0f, 0f);
+                            context.cmd.DrawProcedural(
+                                Matrix4x4.identity,
+                                data.Material,
+                                CacheClearShaderPass,
+                                MeshTopology.Triangles,
+                                3);
+                            context.cmd.SetGlobalDepthBias(1f, CasterSlopeBias);
+                            context.cmd.SetViewProjectionMatrices(data.View, data.Projections[piece]);
+                            context.cmd.DrawRendererList(data.RendererLists[piece]);
+                        }
+                        context.cmd.SetGlobalDepthBias(0f, 0f);
+                        context.cmd.SetViewProjectionMatrices(data.CameraView, data.CameraProjection);
+                    });
+                    LoogaShadowCasterCache.Commit(entry);
+                }
+            }
+
+            // Level texel p is stored at cache texel (p + wrapOffset) mod resolution. A level rect therefore splits
+            // at the level texel that wraps to zero, on each axis.
+            private static void AddCachePieces(
+                CachePassData data,
+                RectInt rect,
+                Vector2Int wrapOffset,
+                int resolution,
+                float radius,
+                float depthRange)
+            {
+                int seamX = resolution - wrapOffset.x;
+                int seamY = resolution - wrapOffset.y;
+                for (int sideY = 0; sideY < 2; sideY++)
+                {
+                    int yMin = sideY == 0 ? rect.yMin : Mathf.Max(rect.yMin, seamY);
+                    int yMax = sideY == 0 ? Mathf.Min(rect.yMax, seamY) : rect.yMax;
+                    if (yMax <= yMin)
+                        continue;
+
+                    for (int sideX = 0; sideX < 2; sideX++)
+                    {
+                        int xMin = sideX == 0 ? rect.xMin : Mathf.Max(rect.xMin, seamX);
+                        int xMax = sideX == 0 ? Mathf.Min(rect.xMax, seamX) : rect.xMax;
+                        if (xMax <= xMin)
+                            continue;
+
+                        // The piece's part of the level's orthographic box, with the level's depth range.
+                        int piece = data.PieceCount++;
+                        int cacheX = xMin + wrapOffset.x - (sideX == 0 ? 0 : resolution);
+                        int cacheY = yMin + wrapOffset.y - (sideY == 0 ? 0 : resolution);
+                        data.Viewports[piece] = new Rect(cacheX, cacheY, xMax - xMin, yMax - yMin);
+                        float scale = 2f * radius / resolution;
+                        data.Projections[piece] = Matrix4x4.Ortho(
+                            -radius + xMin * scale,
+                            -radius + xMax * scale,
+                            -radius + yMin * scale,
+                            -radius + yMax * scale,
+                            0.01f,
+                            depthRange);
+                    }
                 }
             }
 
@@ -787,15 +1610,16 @@ namespace LoogaSoft.Shadows
                         });
                     shadowFrameData.Clipmaps[level] = clipmap;
                     shadowFrameData.DepthClipmaps[level] = depthClipmap;
-                    RendererListHandle rendererList = CreateShadowRendererList(
-                        renderGraph,
-                        shadowCullResults);
 
                     IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass(
                         $"Looga Shadows Render Clipmap {level}",
                         out SeparatePassData passData,
                         _profilingSampler);
-                    passData.RendererList = rendererList;
+                    passData.RendererList = CreateShadowRendererList(
+                        renderGraph,
+                        shadowCullResults,
+                        level);
+                    builder.UseRendererList(passData.RendererList);
                     passData.Level = level;
                     passData.MainLight = _mainLight;
                     passData.Settings = _settings;
@@ -808,7 +1632,6 @@ namespace LoogaSoft.Shadows
                     passData.CameraProjection = cameraData.GetProjectionMatrix();
                     passData.CameraPosition = cameraData.worldSpaceCameraPos;
 
-                    builder.UseRendererList(rendererList);
                     builder.SetRenderAttachmentDepth(clipmap, AccessFlags.Write);
                     builder.AllowGlobalStateModification(true);
                     builder.SetRenderFunc(static (SeparatePassData data, RasterGraphContext context) =>
@@ -821,7 +1644,7 @@ namespace LoogaSoft.Shadows
                         context.cmd.SetGlobalVector(LightPosition, new Vector4(-direction.x, -direction.y, -direction.z, 0f));
                         context.cmd.SetKeyword(LoogaShadowShaderIds.CastingPunctualLightShadow, false);
                         context.cmd.SetViewport(new Rect(0f, 0f, resolution, resolution));
-                        context.cmd.SetGlobalDepthBias(1f, 2.5f);
+                        context.cmd.SetGlobalDepthBias(1f, CasterSlopeBias);
                         context.cmd.SetGlobalVector(
                             ShadowBias,
                             GetCasterShadowBias(
@@ -873,18 +1696,20 @@ namespace LoogaSoft.Shadows
                 return SystemInfo.supportsRawShadowDepthSampling;
             }
 
-            private static Vector4 GetCasterShadowBias(
+            internal static Vector4 GetCasterShadowBias(
                 float worldTexelSize,
                 LoogaShadowResolvedSettings settings)
             {
-                // Filter softness must not inflate per-vertex displacement;
-                // doing so opens visible gaps along mesh-normal seams.
+                // Filter softness must not inflate per-vertex displacement.
+                // A larger displacement opens gaps along mesh-normal seams.
+                // The normal offset follows the texel size of each clipmap
+                // level, because blended levels need the same protection.
                 float depthBias = Mathf.Max(
                     settings.DepthBias,
                     worldTexelSize * 0.02f);
                 float normalBias = Mathf.Max(
                     settings.NormalBias,
-                    worldTexelSize * 0.005f);
+                    worldTexelSize * CasterNormalBiasTexels);
                 return new Vector4(
                     -depthBias,
                     -normalBias,
@@ -892,14 +1717,122 @@ namespace LoogaSoft.Shadows
                     0f);
             }
 
+            // Culls the main light's casters with one split per clipmap level instead of URP's
+            // cascades, so each level draws exactly the casters inside its own box, once, and
+            // BatchRendererGroup culling callbacks receive the clipmap levels as their splits.
+            // URP culled every shadowed light earlier in the frame, and a second call replaces the
+            // casters of all lights, so the spot and point lights get URP's splits again.
+            private void CullClipmapShadowCasters(
+                CullContextData cullContextData,
+                CullingResults cullResults,
+                bool cullAdditionalLights)
+            {
+                NativeArray<VisibleLight> visibleLights = cullResults.visibleLights;
+                NativeArray<LightShadowCasterCullingInfo> perLightInfos =
+                    new(visibleLights.Length, Allocator.Temp);
+                int mainLightSplitCount = _settings.ClipmapCount + _staticSplitCount;
+                NativeArray<ShadowSplitData> splitBuffer = new(
+                    mainLightSplitCount + visibleLights.Length * PointLightShadowSplitCount,
+                    Allocator.Temp);
+                int splitCount = 0;
+                for (int level = 0; level < _settings.ClipmapCount; level++)
+                    splitBuffer[splitCount++] = _clipmapSplits[level];
+                for (int index = 0; index < _staticSplitCount; index++)
+                    splitBuffer[splitCount++] = _staticSplits[index];
+
+                perLightInfos[_mainLightIndex] = new LightShadowCasterCullingInfo
+                {
+                    splitRange = new RangeInt(0, mainLightSplitCount),
+                    projectionType = BatchCullingProjectionType.Orthographic
+                };
+
+                for (int lightIndex = 0; cullAdditionalLights && lightIndex < visibleLights.Length; lightIndex++)
+                {
+                    VisibleLight visibleLight = visibleLights[lightIndex];
+                    if (lightIndex == _mainLightIndex ||
+                        visibleLight.light == null ||
+                        visibleLight.light.shadows == LightShadows.None)
+                    {
+                        continue;
+                    }
+
+                    int firstSplit = splitCount;
+                    if (visibleLight.lightType == LightType.Spot)
+                    {
+                        cullResults.ComputeSpotShadowMatricesAndCullingPrimitives(
+                            lightIndex,
+                            out _,
+                            out _,
+                            out ShadowSplitData splitData);
+                        splitBuffer[splitCount++] = splitData;
+                    }
+                    else if (visibleLight.lightType == LightType.Point)
+                    {
+                        for (int face = 0; face < PointLightShadowSplitCount; face++)
+                        {
+                            cullResults.ComputePointShadowMatricesAndCullingPrimitives(
+                                lightIndex,
+                                (CubemapFace)face,
+                                PointLightCullingFovBias,
+                                out _,
+                                out _,
+                                out ShadowSplitData splitData);
+                            splitBuffer[splitCount++] = splitData;
+                        }
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    perLightInfos[lightIndex] = new LightShadowCasterCullingInfo
+                    {
+                        splitRange = new RangeInt(firstSplit, splitCount - firstSplit),
+                        projectionType = BatchCullingProjectionType.Perspective
+                    };
+                }
+
+                // GPU-driven instancing measures casters in each level's texels: it skips casters too small for
+                // a level and lowers their LOD there. The culling context has no shadow-map resolution.
+                System.Span<float> texelSizes = stackalloc float[mainLightSplitCount];
+                for (int level = 0; level < _settings.ClipmapCount; level++)
+                    texelSizes[level] = _clipmapRadii[level].y;
+                for (int index = 0; index < _staticSplitCount; index++)
+                    texelSizes[_settings.ClipmapCount + index] = _clipmapRadii[_staticSplitLevels[index]].y;
+                // Cached levels draw static casters from their caches, so static instancing skips their splits.
+                int dynamicOnlySplits = 0;
+                for (int level = 0; level < _settings.ClipmapCount; level++)
+                {
+                    if (UsesCache(level))
+                        dynamicOnlySplits |= 1 << level;
+                }
+                LoogaSoft.Instancing.InstanceShadowSplits.SetTexelSizes(
+                    _mainLight.light,
+                    texelSizes,
+                    dynamicOnlySplits);
+
+                cullContextData.CullShadowCasters(
+                    cullResults,
+                    new ShadowCastersCullingInfos
+                    {
+                        perLightInfos = perLightInfos,
+                        splitBuffer = splitBuffer.GetSubArray(0, splitCount)
+                    });
+            }
+
             private RendererListHandle CreateShadowRendererList(
                 RenderGraph renderGraph,
-                CullingResults shadowCullResults)
+                CullingResults shadowCullResults,
+                int splitIndex,
+                ShadowObjectsFilter objectsFilter = ShadowObjectsFilter.AllObjects)
             {
+                // The split's culling data and projection come from CullClipmapShadowCasters.
                 ShadowDrawingSettings shadowDrawingSettings = new(
                     shadowCullResults,
                     _mainLightIndex)
                 {
+                    splitIndex = splitIndex,
+                    objectsFilter = objectsFilter,
                     useRenderingLayerMaskTest =
                         UniversalRenderPipeline.asset != null &&
                         UniversalRenderPipeline.asset.useRenderingLayers
@@ -917,18 +1850,21 @@ namespace LoogaSoft.Shadows
             private const int RefilterShaderPass = 9;
             private readonly ProfilingSampler _profilingSampler = new("Looga Shadows Resolve Virtual Clipmaps");
             private Material _material;
+            private LoogaShadowReceiverBounds _receiverBounds;
             private LoogaShadowResolvedSettings _settings;
             private Matrix4x4[] _worldToShadow;
             private Vector4[] _clipmapCenters;
             private Vector4[] _clipmapRadii;
             private Vector4[] _clipmapRects;
             private Vector3 _lightDirection;
+            private Vector4 _mainLightShadowParams;
             private LoogaShadowNormalsSource _normalsSource;
             private bool _requiresCameraNormals;
             private bool _normalsOctEncoded;
 
             private sealed class PassData
             {
+                public Vector4 MainLightShadowParams;
                 public TextureHandle Clipmap0;
                 public TextureHandle Clipmap1;
                 public TextureHandle Clipmap2;
@@ -960,22 +1896,26 @@ namespace LoogaSoft.Shadows
 
             public void Setup(
                 Material material,
+                LoogaShadowReceiverBounds receiverBounds,
                 LoogaShadowResolvedSettings settings,
                 Matrix4x4[] worldToShadow,
                 Vector4[] clipmapCenters,
                 Vector4[] clipmapRadii,
                 Vector4[] clipmapRects,
                 Vector3 lightDirection,
+                Vector4 mainLightShadowParams,
                 bool usesDeferredLighting,
                 bool usesAccurateGBufferNormals)
             {
                 _material = material;
+                _receiverBounds = receiverBounds;
                 _settings = settings;
                 _worldToShadow = worldToShadow;
                 _clipmapCenters = clipmapCenters;
                 _clipmapRadii = clipmapRadii;
                 _clipmapRects = clipmapRects;
                 _lightDirection = lightDirection;
+                _mainLightShadowParams = mainLightShadowParams;
                 _normalsSource = GetEffectiveNormalsSource(
                     settings.NormalsSource,
                     usesDeferredLighting);
@@ -1028,6 +1968,8 @@ namespace LoogaSoft.Shadows
                     !cameraDepth.IsValid() ||
                     (_requiresCameraNormals && !cameraNormals.IsValid()))
                     return;
+
+                _receiverBounds?.RecordPass(renderGraph, cameraData, cameraDepth);
 
                 RenderTextureDescriptor descriptor = cameraData.cameraTargetDescriptor;
                 descriptor.depthStencilFormat = GraphicsFormat.None;
@@ -1092,6 +2034,7 @@ namespace LoogaSoft.Shadows
                 passData.NormalsSource = _normalsSource;
                 passData.RequiresCameraNormals = _requiresCameraNormals;
                 passData.NormalsOctEncoded = _normalsOctEncoded;
+                passData.MainLightShadowParams = _mainLightShadowParams;
 
                 builder.UseAllGlobalTextures(true);
                 builder.UseTexture(clipmap0, AccessFlags.Read);
@@ -1226,6 +2169,11 @@ namespace LoogaSoft.Shadows
                         data.Material,
                         DenoiseShaderPass);
                     context.cmd.SetGlobalInteger(LoogaShadowShaderIds.ShadowsEnabled, 1);
+                    // URP's lit shaders fade the screen-space shadow by these parameters. URP fills them
+                    // from its own shadow distance, so replace them with the Looga shadow distance.
+                    context.cmd.SetGlobalVector(
+                        LoogaShadowShaderIds.UrpMainLightShadowParams,
+                        data.MainLightShadowParams);
                     context.cmd.SetKeyword(LoogaShadowShaderIds.MainLightShadows, false);
                     context.cmd.SetKeyword(LoogaShadowShaderIds.MainLightShadowCascades, false);
                     context.cmd.SetKeyword(LoogaShadowShaderIds.MainLightShadowScreen, true);
@@ -1350,8 +2298,7 @@ namespace LoogaSoft.Shadows
                 new Vector4[MaximumClipmapCount];
             private Vector4 _splitSphereRadii;
             private LoogaShadowResolvedSettings _settings;
-            private float _shadowStrength;
-            private float _softShadowQuality;
+            private Vector4 _shadowParams;
 
             private sealed class PassData
             {
@@ -1370,16 +2317,10 @@ namespace LoogaSoft.Shadows
                 Matrix4x4[] worldToShadow,
                 Vector4[] clipmapCenters,
                 Vector4[] clipmapRadii,
-                Light mainLight)
+                Vector4 shadowParams)
             {
                 _settings = settings;
-                _shadowStrength = mainLight != null
-                    ? mainLight.shadowStrength
-                    : 1f;
-                _softShadowQuality = mainLight != null &&
-                    mainLight.shadows == LightShadows.Soft
-                        ? 1f
-                        : 0f;
+                _shadowParams = shadowParams;
 
                 Matrix4x4 noOpShadowMatrix = Matrix4x4.zero;
                 noOpShadowMatrix.m22 = SystemInfo.usesReversedZBuffer
@@ -1425,13 +2366,6 @@ namespace LoogaSoft.Shadows
                     out PassData passData,
                     _profilingSampler);
 
-                float shadowDistanceSquared =
-                    _settings.ShadowDistance * _settings.ShadowDistance;
-                float fadeStartSquared = shadowDistanceSquared * 0.81f;
-                float fadeRangeSquared = Mathf.Max(
-                    shadowDistanceSquared - fadeStartSquared,
-                    0.0001f);
-
                 passData.Atlas = atlas;
                 passData.HasAtlas = hasAtlas;
                 passData.ClipmapCount = _settings.ClipmapCount;
@@ -1439,11 +2373,7 @@ namespace LoogaSoft.Shadows
                 passData.WorldToShadow = _worldToShadow;
                 passData.SplitSpheres = _splitSpheres;
                 passData.SplitSphereRadii = _splitSphereRadii;
-                passData.ShadowParams = new Vector4(
-                    _shadowStrength,
-                    _softShadowQuality,
-                    1f / fadeRangeSquared,
-                    -fadeStartSquared / fadeRangeSquared);
+                passData.ShadowParams = _shadowParams;
 
                 builder.SetRenderAttachment(
                     resourceData.activeColorTexture,
@@ -1526,6 +2456,10 @@ namespace LoogaSoft.Shadows
                     context.cmd.SetKeyword(
                         LoogaShadowShaderIds.MainLightShadowCascades,
                         data.ClipmapCount > 1);
+                    // URP's main-light pass no longer runs, so it no longer enables soft filtering for
+                    // a soft main light. Only enable it: soft additional lights may have set it already.
+                    if (data.ShadowParams.y > 0f)
+                        context.cmd.SetKeyword(LoogaShadowShaderIds.SoftShadows, true);
                 });
             }
         }

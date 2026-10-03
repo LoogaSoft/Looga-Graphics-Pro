@@ -3,7 +3,8 @@
   "rootNamespace": "LoogaSoft.Shadows",
   "references": [
     "Unity.RenderPipelines.Core.Runtime",
-    "Unity.RenderPipelines.Universal.Runtime"
+    "Unity.RenderPipelines.Universal.Runtime",
+    "LoogaSoft.Instancing"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],

@@ -1,0 +1,61 @@
+// Reduces a camera depth texture to the eye depth of the nearest visible receiver.
+// The clipmap allocator reads the result back asynchronously to size the finest level.
+#pragma kernel ClearBounds
+#pragma kernel ReduceBounds
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+
+#define LOOGA_EMPTY_DEPTH_BITS 0x7F7FFFFF
+
+Texture2D<float> _LoogaReceiverDepthTexture;
+RWByteAddressBuffer _LoogaReceiverBounds;
+
+// x: GPU projection m22, y: GPU projection m23, z: width, w: height.
+float4 _LoogaReceiverDepthParams;
+
+groupshared uint gs_NearestDepthBits;
+
+[numthreads(1, 1, 1)]
+void ClearBounds()
+{
+    _LoogaReceiverBounds.Store(0, LOOGA_EMPTY_DEPTH_BITS);
+}
+
+[numthreads(16, 16, 1)]
+void ReduceBounds(uint3 dispatchId : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
+{
+    if (groupIndex == 0)
+        gs_NearestDepthBits = LOOGA_EMPTY_DEPTH_BITS;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (dispatchId.x < (uint)_LoogaReceiverDepthParams.z &&
+        dispatchId.y < (uint)_LoogaReceiverDepthParams.w)
+    {
+        float deviceDepth = _LoogaReceiverDepthTexture.Load(int3(dispatchId.xy, 0));
+    #if UNITY_REVERSED_Z
+        bool isSky = deviceDepth <= 0.000001;
+    #else
+        bool isSky = deviceDepth >= 0.999999;
+    #endif
+        // OpenGL-style clip space stores depth as z * 0.5 + 0.5.
+        if (UNITY_NEAR_CLIP_VALUE < 0.0)
+            deviceDepth = deviceDepth * 2.0 - 1.0;
+        // A perspective GPU projection stores clip.w = eye depth, so
+        // deviceDepth = -m22 + m23 / eyeDepth on every platform.
+        float eyeDepth = _LoogaReceiverDepthParams.y /
+            (deviceDepth + _LoogaReceiverDepthParams.x);
+        // Positive floats order like their bit patterns, so the minimum
+        // can be taken with integer atomics.
+        if (!isSky && eyeDepth > 0.0)
+            InterlockedMin(gs_NearestDepthBits, asuint(eyeDepth));
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (groupIndex == 0 && gs_NearestDepthBits != LOOGA_EMPTY_DEPTH_BITS)
+    {
+        uint previous;
+        _LoogaReceiverBounds.InterlockedMin(0, gs_NearestDepthBits, previous);
+    }
+}

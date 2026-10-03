@@ -21,6 +21,7 @@ namespace LoogaSoft.Shadows
         public readonly int ClipmapCount;
         public readonly int BlockerSampleCount;
         public readonly int FilterSampleCount;
+        public readonly int CachedLevels;
         public readonly string SettingsSource;
 
         private LoogaShadowResolvedSettings(
@@ -51,11 +52,16 @@ namespace LoogaSoft.Shadows
                 _ => (4096, 4, 12, 32)
             };
 
+            // The finest level is never cached, and each cached level needs up to two extra culling splits.
+            CachedLevels = Mathf.Clamp(settings.CachedLevels, 0, Mathf.Min(2, ClipmapCount - 1));
+
             if (shadowLight != null && shadowLight.OverrideSourceAngularDiameter)
                 SourceAngularDiameter = shadowLight.SourceAngularDiameter;
         }
 
         public int TileResolution => AtlasResolution / 2;
+
+        public bool IsCachedLevel(int level) => level >= ClipmapCount - CachedLevels;
 
         public int GetClipmapResolution(int level)
         {

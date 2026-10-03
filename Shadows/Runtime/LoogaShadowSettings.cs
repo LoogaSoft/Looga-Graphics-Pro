@@ -6,7 +6,7 @@ namespace LoogaSoft.Shadows
     [Serializable]
     public struct LoogaShadowSettings
     {
-        internal const int CurrentVersion = 2;
+        internal const int CurrentVersion = 3;
 
         [SerializeField, HideInInspector]
         private int _version;
@@ -20,7 +20,7 @@ namespace LoogaSoft.Shadows
         private bool _renderSceneView;
 
         [SerializeField, Min(1f)]
-        [Tooltip("Half-width in meters of the highest-detail clipmap around the camera.")]
+        [Tooltip("Smallest half-width in meters of the highest-detail clipmap. The renderer grows it when the nearest visible surface is far from the camera, so its texels land where shadows are seen.")]
         private float _nearClipmapRadius;
 
         [SerializeField, Min(10f)]
@@ -48,12 +48,16 @@ namespace LoogaSoft.Shadows
         private float _depthBias;
 
         [SerializeField, Range(0f, 0.1f)]
-        [Tooltip("World-space normal-bias floor applied while rendering shadow casters.")]
+        [Tooltip("World-space normal-bias floor applied while rendering shadow casters. Each clipmap level also applies at least 3.5 of its own texels.")]
         private float _normalBias;
 
         [SerializeField, Range(0f, 0.25f)]
         [Tooltip("Width of the overlap used to blend adjacent clipmap levels.")]
         private float _clipmapBlend;
+
+        [SerializeField, Range(0, 2)]
+        [Tooltip("Number of coarsest clipmap levels that keep their static shadow casters between frames: renderers marked Static Shadow Caster and static Looga Instancing renderers. A cached level draws only the strip it scrolls onto, plus its other casters every frame. Each cached level keeps one tile-sized depth texture per camera.")]
+        private int _cachedLevels;
 
         [SerializeField]
         [Tooltip("Selects the surface-normal source used by shadow reconstruction. G-Buffers is preferred for deferred rendering, Reconstruct From Depth avoids material normal maps, and Depth + Normals Pass requests URP's normals prepass.")]
@@ -74,6 +78,7 @@ namespace LoogaSoft.Shadows
         public float DepthBias => _depthBias;
         public float NormalBias => _normalBias;
         public float ClipmapBlend => _clipmapBlend;
+        public int CachedLevels => _cachedLevels;
         public LoogaShadowNormalsSource NormalsSource => _normalsSource;
         public LoogaShadowDebugView DebugView => _debugView;
         internal bool IsInitialized => _version >= CurrentVersion;
@@ -106,10 +111,12 @@ namespace LoogaSoft.Shadows
             float normalBias,
             float clipmapBlend,
             LoogaShadowNormalsSource normalsSource,
-            LoogaShadowDebugView debugView)
+            LoogaShadowDebugView debugView,
+            int cachedLevels = 1)
         {
             LoogaShadowSettings settings = new()
             {
+                _cachedLevels = cachedLevels,
                 _version = CurrentVersion,
                 _quality = quality,
                 _renderSceneView = renderSceneView,
@@ -137,12 +144,14 @@ namespace LoogaSoft.Shadows
                 return;
             }
 
+            if (_version >= CurrentVersion)
+                return;
+
             if (_version < 2)
-            {
                 _normalsSource = LoogaShadowNormalsSource.GBuffer;
-                _version = 2;
-                Validate();
-            }
+            if (_version < 3)
+                _cachedLevels = 1;
+            Validate();
         }
 
         internal void Validate()
@@ -157,6 +166,7 @@ namespace LoogaSoft.Shadows
             _depthBias = Mathf.Clamp(_depthBias, 0f, 0.02f);
             _normalBias = Mathf.Clamp(_normalBias, 0f, 0.1f);
             _clipmapBlend = Mathf.Clamp(_clipmapBlend, 0f, 0.25f);
+            _cachedLevels = Mathf.Clamp(_cachedLevels, 0, 2);
             if (!Enum.IsDefined(typeof(LoogaShadowNormalsSource), _normalsSource))
                 _normalsSource = LoogaShadowNormalsSource.GBuffer;
             if (!Enum.IsDefined(typeof(LoogaShadowDebugView), _debugView))

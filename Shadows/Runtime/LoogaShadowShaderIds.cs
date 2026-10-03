@@ -60,5 +60,6 @@ namespace LoogaSoft.Shadows
         public static readonly GlobalKeyword MainLightShadowCascades = GlobalKeyword.Create("_MAIN_LIGHT_SHADOWS_CASCADE");
         public static readonly GlobalKeyword MainLightShadowScreen = GlobalKeyword.Create("_MAIN_LIGHT_SHADOWS_SCREEN");
         public static readonly GlobalKeyword CastingPunctualLightShadow = GlobalKeyword.Create("_CASTING_PUNCTUAL_LIGHT_SHADOW");
+        public static readonly GlobalKeyword SoftShadows = GlobalKeyword.Create("_SHADOWS_SOFT");
     }
 }

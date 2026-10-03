@@ -43,6 +43,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
 
         #define LOOGA_MAX_BLOCKER_SAMPLES 16
         #define LOOGA_MAX_FILTER_SAMPLES 48
+        #define LOOGA_MIN_FILTER_TEXELS 1.0
         #define LOOGA_GOLDEN_ANGLE 2.39996323
         #define LOOGA_PI 3.14159265
 
@@ -75,7 +76,12 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
         {
             float3 normalWS = cross(positionDerivativeX, positionDerivativeY);
             float normalLengthSquared = dot(normalWS, normalWS);
-            if (normalLengthSquared <= 0.0000000001)
+            // Relative to the pixel footprint, so near receivers with
+            // millimetre-sized pixels are not mistaken for degenerate ones.
+            float footprintSquared =
+                dot(positionDerivativeX, positionDerivativeX) *
+                dot(positionDerivativeY, positionDerivativeY);
+            if (normalLengthSquared <= footprintSquared * 0.00000001)
                 return float3(0.0, 1.0, 0.0);
 
             normalWS *= rsqrt(normalLengthSquared);
@@ -127,6 +133,15 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
         float2 LoogaLocalToAtlasUv(float2 localUv, int level)
         {
             return LoogaTileOrigin(level) + localUv * 0.5;
+        }
+
+        // Distance from the nearest tile border in local [0, 1] tile units.
+        float LoogaClipmapEdgeDistance(float4 shadowCoord, int level)
+        {
+            float2 localUv = LoogaAtlasToLocalUv(shadowCoord.xy, level);
+            return min(
+                min(localUv.x, localUv.y),
+                min(1.0 - localUv.x, 1.0 - localUv.y));
         }
 
         float2 LoogaClampToTile(float2 atlasUv, int level)
@@ -307,6 +322,32 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
                 receiverBiasWorld);
         }
 
+        // Four bilinear comparisons at half-texel offsets form a 3x3 texel
+        // tent: the narrowest kernel that resolves a clipmap's texel staircase
+        // instead of aliasing it. The offsets stay within the caster slope
+        // bias, so no receiver-plane correction is needed.
+        float LoogaFilterTexelTent(
+            float4 shadowCoord,
+            float receiverBiasWorld,
+            int level)
+        {
+            float halfTexelUv = _LoogaVirtualShadowAtlasSize.y * 0.5;
+            float visibility = 0.0;
+            [unroll]
+            for (int tap = 0; tap < 4; tap++)
+            {
+                float2 offset = float2(
+                    (tap & 1) ? halfTexelUv : -halfTexelUv,
+                    (tap & 2) ? halfTexelUv : -halfTexelUv);
+                visibility += LoogaSampleComparison(
+                    LoogaClampToTile(shadowCoord.xy + offset, level),
+                    shadowCoord.z,
+                    receiverBiasWorld);
+            }
+
+            return visibility * 0.25;
+        }
+
         float LoogaFindAverageBlockerDistance(
             float4 shadowCoord,
             int level,
@@ -326,9 +367,18 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
             float worldTexel = _LoogaClipmapRadii[level].y;
             float atlasUvPerWorldUnit = _LoogaVirtualShadowAtlasSize.w * 0.5 /
                 max(worldTexel, 0.00001);
+            // Stop the search at the tile border instead of reserving the full
+            // search radius at every clipmap edge. Receivers this close to the
+            // border are blended into the next level by LoogaClipmapEdgeBlend.
+            float availableSearchWorld = max(
+                LoogaClipmapEdgeDistance(shadowCoord, level) -
+                    _LoogaVirtualShadowAtlasSize.w * 1.5,
+                0.0) * _LoogaClipmapRadii[level].x * 2.0;
             float maximumSearchWorld = min(
-                _LoogaSoftShadowData.z,
-                _LoogaClipmapRadii[level].x * 0.45);
+                min(
+                    _LoogaSoftShadowData.z,
+                    _LoogaClipmapRadii[level].x * 0.45),
+                availableSearchWorld);
             float blockerDistanceSum = 0.0;
             float blockerWeightSum = 0.0;
             float unweightedBlockerDistanceSum = 0.0;
@@ -611,23 +661,22 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
 
         float LoogaClipmapEdgeBlend(
             float4 shadowCoord,
-            int level)
+            int level,
+            float kernelWorld)
         {
             if (level + 1 >= _LoogaClipmapCount)
                 return 0.0;
 
-            float2 localUv = LoogaAtlasToLocalUv(shadowCoord.xy, level);
-            float edgeDistance = min(min(localUv.x, localUv.y), min(1.0 - localUv.x, 1.0 - localUv.y));
+            float edgeDistance = LoogaClipmapEdgeDistance(shadowCoord, level);
             float radius = _LoogaClipmapRadii[level].x;
-            float blockerSearchWorld = min(
-                _LoogaSoftShadowData.z,
-                radius * 0.45);
-            // The blocker pass must use a position-only handoff. Feeding its
-            // estimated penumbra back into level selection makes the estimate
-            // and transition weight depend on one another, which produces a
-            // camera-relative outline after denoising.
+            // The blocker pass must use a position-only handoff (kernelWorld = 0).
+            // Feeding its estimated penumbra back into level selection makes the
+            // estimate and transition weight depend on one another, which
+            // produces a camera-relative outline after denoising. Its search
+            // shrinks at the border instead. The filter pass passes its
+            // denoised penumbra so the PCSS kernel leaves before the border.
             float kernelMargin =
-                blockerSearchWorld / max(radius * 2.0, 0.00001);
+                kernelWorld / max(radius * 2.0, 0.00001);
             kernelMargin += _LoogaVirtualShadowAtlasSize.w * 1.5;
             if (kernelMargin >= 0.5)
                 return 1.0;
@@ -684,7 +733,8 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
 
                 float edgeBlend = LoogaClipmapEdgeBlend(
                     LoogaGetShadowCoordinate(biasedPosition, level),
-                    level);
+                    level,
+                    0.0);
                 if (edgeBlend <= 0.0)
                     break;
 
@@ -720,7 +770,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
             float3 positionDerivativeX,
             float3 positionDerivativeY)
         {
-            LoogaShadowEvaluation result;
+            LoogaShadowEvaluation result = (LoogaShadowEvaluation)0;
             float4 shadowCoord = LoogaGetShadowCoordinate(positionWS, level);
             float2 receiverDepthGradient =
                 LoogaReceiverDepthGradient(
@@ -739,9 +789,16 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
             result.penumbra = penumbraWorld;
             float sourceSlope = tan(radians(_LoogaSoftShadowData.x) * 0.5) *
                 _LoogaSoftShadowData.y;
-            if (sourceSlope <= 0.000001 || penumbraWorld <= 0.000001)
+            // A kernel narrower than one texel of this level samples the shadow
+            // map below its Nyquist rate, so physical penumbrae smaller than a
+            // texel would show the texel staircase. Filter at least one texel.
+            if (sourceSlope <= 0.000001 ||
+                penumbraWorld <= worldTexel * LOOGA_MIN_FILTER_TEXELS)
             {
-                result.visibility = result.rawVisibility;
+                result.visibility = LoogaFilterTexelTent(
+                    shadowCoord,
+                    receiverBiasWorld,
+                    level);
                 return result;
             }
 
@@ -790,7 +847,8 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
 
                 float edgeBlend = LoogaClipmapEdgeBlend(
                     LoogaGetShadowCoordinate(biasedPosition, level),
-                    level);
+                    level,
+                    penumbraWorld);
                 edgeBlend = max(
                     edgeBlend,
                     LoogaClipmapFootprintBlend(level, penumbraWorld));
