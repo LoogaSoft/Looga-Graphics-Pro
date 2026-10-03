@@ -8,6 +8,7 @@ Looga Graphics Pro unifies Looga Lighting, runtime virtual texturing, custom lig
 - Set the Universal Renderer to **Deferred+**.
 - Add **Looga GTAO**, then **Looga Lighting**, to the renderer feature list.
 - Add **Looga Shadows** when the renderer should use Looga virtual shadows.
+- Add **Looga Impasto** after Looga GTAO for a hand-painted look on every opaque material.
 - Add **Looga Runtime Virtual Texture** when shaders need a camera-centered world-space surface cache.
 - URP shadow masks, mixed lighting, light cookies, light layers, screen-space AO, reflection probes, and deferred decals are consumed by Looga's lighting pass.
 
@@ -16,6 +17,27 @@ Each system remains independently configurable. Looga GTAO can generate ambient 
 ## Runtime Virtual Texturing
 
 Looga Runtime Virtual Texturing renders four packed, camera-centered clipmaps. The cache stores albedo, world normal, height, smoothness, metallic, coverage, and a custom mask. Receiver shaders use the provided HLSL sampling contract. See [Runtime Virtual Texturing](Documentation~/runtime-virtual-texturing.md) for setup and current limits.
+
+## Impasto
+
+Looga Impasto paints thick brush strokes into the G-buffer after it is written, so every opaque deferred
+material looks hand-painted without texture or material changes. A world-space triplanar projection of a stroke
+texture replaces fine material detail in the stored normals, while large shapes from the geometry remain. The
+paint's height adds occlusion between strokes and gloss on ridges. Hex tiling rotates and shifts the strokes per
+cell, and overlapping cells keep the thicker paint, so the tiling does not repeat visibly.
+
+- Place the feature after Looga GTAO. It then runs after ambient occlusion and Looga Shadows, which keep the real
+  geometry, and before Looga Lighting, which lights the painted surface.
+- Create stroke sets with **LoogaSoft > Graphics Pro > Impasto > Stroke Generator** and assign them to
+  **Stroke Texture**. The texture holds the stroke normal in RG and the paint height in B.
+- Limits: strokes are anchored in world space, so they slide over moving objects. Forward-rendered and transparent
+  materials are not painted.
+
+For moving objects, characters and forward rendering, enable **Impasto** on a Looga Lit material instead. Its
+strokes are anchored in object space and scale with the object, so they stay put as it moves. The material has
+its own stroke texture and settings, and the global pass leaves its pixels alone. **Deep Impasto** adds a short
+parallax march so strokes appear to sit on top of the surface and shift the material's textures with them. On a
+fullscreen surface at 1080p, material impasto adds about 0.03 ms and Deep Impasto about 0.17 ms.
 
 ## Light Attenuation
 

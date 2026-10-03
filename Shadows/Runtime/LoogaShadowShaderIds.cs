@@ -41,6 +41,7 @@ namespace LoogaSoft.Shadows
         public static readonly int BiasData = Shader.PropertyToID("_LoogaShadowBiasData");
         public static readonly int DistanceData = Shader.PropertyToID("_LoogaShadowDistanceData");
         public static readonly int DenoiseDirection = Shader.PropertyToID("_LoogaDenoiseDirection");
+        public static readonly int ResolveTargetSize = Shader.PropertyToID("_LoogaResolveTargetSize");
         public static readonly int BlueNoiseTexture = Shader.PropertyToID("_LoogaBlueNoiseTexture");
         public static readonly int BlueNoiseAvailable = Shader.PropertyToID("_LoogaBlueNoiseAvailable");
         public static readonly int NormalsSource = Shader.PropertyToID("_LoogaNormalsSource");

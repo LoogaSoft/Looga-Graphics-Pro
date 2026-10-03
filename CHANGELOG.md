@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Add the **Looga Impasto** renderer feature. It paints world-space brush strokes into the G-buffer normals,
+  occlusion and smoothness of every opaque deferred material before Looga Lighting, without texture changes.
+  Costs well under 0.1 ms at 1080p on an RTX 5080.
+- Add **LoogaSoft > Graphics Pro > Impasto > Stroke Generator**. It paints tileable stroke sets with bristle
+  grooves, end ridges and layered paint, and saves them as stroke textures. The package includes a default set.
+- Add an **Impasto** section to Looga Lit materials. It paints object-anchored strokes in the material, so they
+  follow moving objects and work in forward rendering. **Deep Impasto** adds parallax that displaces the
+  material's textures with the paint. The Looga Impasto feature skips these materials through a stencil mask pass.
+- Looga Shadows reads stored depth from the shadow atlas directly where textures and samplers are separate
+  (Direct3D 11 and 12, Vulkan, Metal), instead of copying the atlas every frame.
+- Looga Shadows estimates penumbra widths at half resolution and upsamples them with depth weights. With the
+  removed copy, the shadow cost at 1080p drops from 2.2 to 1.2 ms at Ultra and from 1.2 to 0.7 ms at High.
+
 ## 1.4.0 - 2026-09-27
 
 - Add the **Looga Post Processing** Volume override and renderer feature. They contain bloom and tonemapping, and later post-processing effects.

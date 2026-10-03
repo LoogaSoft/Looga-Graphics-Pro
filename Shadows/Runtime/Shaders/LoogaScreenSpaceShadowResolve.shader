@@ -20,8 +20,9 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
 
         TEXTURE2D_SHADOW(_LoogaVirtualShadowAtlas);
         SAMPLER_CMP(sampler_LoogaVirtualShadowAtlas);
+        // Either an R16 copy of the atlas or, where raw shadow-depth sampling is supported, the atlas itself,
+        // whose own sampler compares depths. Always read it through a plain point sampler.
         TEXTURE2D(_LoogaVirtualShadowDepthAtlas);
-        SAMPLER(sampler_LoogaVirtualShadowDepthAtlas);
         TEXTURE2D(_LoogaBlueNoiseTexture);
         TEXTURE2D_X(_LoogaDebugFinalTexture);
         TEXTURE2D_X(_LoogaDebugRawTexture);
@@ -36,6 +37,8 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
         float4 _LoogaShadowBiasData;
         float4 _LoogaShadowDistanceData;
         float4 _LoogaDenoiseDirection;
+        // Size of the render target the pass writes: half resolution for the blocker search and its denoise.
+        float4 _LoogaResolveTargetSize;
         float _LoogaBlueNoiseAvailable;
         int _LoogaNormalsSource;
         int _LoogaNormalsOctEncoded;
@@ -212,7 +215,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
         {
             return SAMPLE_TEXTURE2D_LOD(
                 _LoogaVirtualShadowDepthAtlas,
-                sampler_LoogaVirtualShadowDepthAtlas,
+                sampler_PointClamp,
                 uv,
                 0.0).r;
         }
@@ -297,7 +300,8 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
 
         float LoogaReceiverNoise(float2 screenUv)
         {
-            int2 pixel = (int2)floor(screenUv * _ScreenParams.xy);
+            // Pixels of the written target, so a half-resolution pass still reads a full blue-noise tile.
+            int2 pixel = (int2)floor(screenUv * _LoogaResolveTargetSize.xy);
             float noise = LoogaHashNoise(pixel);
             if (_LoogaBlueNoiseAvailable > 0.5)
             {
@@ -933,7 +937,45 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
             float3 normalWS;
             float deviceDepth;
             LoogaShadowEvaluation shadow = LoogaEvaluateScreen(input.texcoord, positionWS, normalWS, deviceDepth);
-            return half4(shadow.visibility, shadow.penumbra, 0.0, 1.0);
+            // The eye depth lets the full-resolution refilter upsample the penumbra across silhouettes.
+            return half4(shadow.visibility, shadow.penumbra, LinearEyeDepth(deviceDepth, _ZBufferParams), 1.0);
+        }
+
+        // Penumbra of a full-resolution pixel from the lower-resolution blocker search: bilinear taps weighted
+        // by how close each tap's eye depth is to the pixel's, so silhouettes do not take the other surface's
+        // penumbra. Falls back to the nearest-depth tap when every tap lies on another surface.
+        float LoogaUpsamplePenumbra(float2 uv, float eyeDepth)
+        {
+            float2 sourceSize = _BlitTexture_TexelSize.zw;
+            float2 sourcePosition = uv * sourceSize - 0.5;
+            int2 basePixel = (int2)floor(sourcePosition);
+            float2 fraction = sourcePosition - basePixel;
+            float depthTolerance = max(eyeDepth * 0.03, 0.01);
+            float penumbraSum = 0.0;
+            float weightSum = 0.0;
+            float nearestDepthDifference = 1e20;
+            float nearestPenumbra = 0.0;
+            [unroll]
+            for (int tap = 0; tap < 4; tap++)
+            {
+                int2 offset = int2(tap & 1, tap >> 1);
+                int2 pixel = clamp(basePixel + offset, int2(0, 0), (int2)sourceSize - 1);
+                float3 sampleData = LOAD_TEXTURE2D_X(_BlitTexture, pixel).gbr;
+                float bilinearWeight =
+                    (offset.x == 0 ? 1.0 - fraction.x : fraction.x) *
+                    (offset.y == 0 ? 1.0 - fraction.y : fraction.y);
+                float depthDifference = abs(sampleData.y - eyeDepth);
+                float depthWeight = 1.0 - smoothstep(depthTolerance, depthTolerance * 3.0, depthDifference);
+                penumbraSum += sampleData.x * bilinearWeight * depthWeight;
+                weightSum += bilinearWeight * depthWeight;
+                if (depthDifference < nearestDepthDifference)
+                {
+                    nearestDepthDifference = depthDifference;
+                    nearestPenumbra = sampleData.x;
+                }
+            }
+
+            return weightSum > 0.0001 ? penumbraSum / weightSum : nearestPenumbra;
         }
 
         half4 FragRefilter(Varyings input) : SV_Target
@@ -954,10 +996,9 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
                 biasNormalWS * dot(biasNormalWS, positionDerivativeX);
             positionDerivativeY -=
                 biasNormalWS * dot(biasNormalWS, positionDerivativeY);
-            float penumbraWorld = SAMPLE_TEXTURE2D_X(
-                _BlitTexture,
-                sampler_PointClamp,
-                uv).g;
+            float penumbraWorld = LoogaUpsamplePenumbra(
+                uv,
+                LinearEyeDepth(deviceDepth, _ZBufferParams));
             float sampleRotation =
                 LoogaReceiverNoise(uv) * (2.0 * LOOGA_PI);
             LoogaShadowEvaluation shadow = LoogaFilterShadow(
@@ -978,9 +1019,11 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
         {
             float2 centerUv = input.texcoord;
             float centerDeviceDepth = SampleLoogaShadowDepth(centerUv);
-            float2 centerShadow = SAMPLE_TEXTURE2D_X(_BlitTexture, sampler_PointClamp, centerUv).rg;
+            // B carries the blocker search's eye depth through the denoise passes.
+            float3 centerData = SAMPLE_TEXTURE2D_X(_BlitTexture, sampler_PointClamp, centerUv).rgb;
+            float2 centerShadow = centerData.rg;
             if (LoogaIsSky(centerDeviceDepth))
-                return half4(centerShadow, 0.0, 1.0);
+                return half4(centerData, 1.0);
 
             float3 centerPosition = LoogaReconstructWorldPosition(centerUv, centerDeviceDepth);
             float3 centerNormal = LoogaResolveSurfaceNormal(
@@ -989,11 +1032,12 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
             // Reconstruct the pixel footprint at the center depth. Screen-space
             // derivatives span both surfaces at silhouettes and would otherwise
             // relax the bilateral depth rejection exactly where it must be strict.
+            // The footprint is one pixel of the filtered texture, which may be half resolution.
             float3 footprintPositionX = LoogaReconstructWorldPosition(
-                saturate(centerUv + float2(_LoogaShadowDepthTexture_TexelSize.x, 0.0)),
+                saturate(centerUv + float2(_BlitTexture_TexelSize.x, 0.0)),
                 centerDeviceDepth);
             float3 footprintPositionY = LoogaReconstructWorldPosition(
-                saturate(centerUv + float2(0.0, _LoogaShadowDepthTexture_TexelSize.y)),
+                saturate(centerUv + float2(0.0, _BlitTexture_TexelSize.y)),
                 centerDeviceDepth);
             float receiverFootprint = max(
                 length(footprintPositionX - centerPosition),
@@ -1064,7 +1108,7 @@ Shader "Hidden/LoogaSoft/Shadows/VirtualShadowResolve"
             return half4(
                 resolvedVisibility,
                 resolvedPenumbra,
-                0.0,
+                centerData.b,
                 1.0);
         }
 

@@ -189,6 +189,81 @@ namespace LoogaSoft.Lighting.Editor
             });
         }
 
+        // Material impasto: brush strokes anchored to the object. Materials with it are skipped by the global
+        // Looga Impasto pass.
+        protected void DrawImpastoSection(MaterialEditor materialEditor, MaterialProperty[] properties, string prefKey)
+        {
+            MaterialProperty enabled = FindProperty("_Impasto", properties, false);
+            if (enabled == null)
+                return;
+
+            Section("Impasto", prefKey, false, () =>
+            {
+                materialEditor.ShaderProperty(enabled, "Enable Impasto");
+                if (!enabled.hasMixedValue && enabled.floatValue < 0.5f)
+                    return;
+
+                EditorGUI.indentLevel++;
+                MaterialProperty strokes = FindProperty("_ImpastoStrokeMap", properties, false);
+                if (strokes != null)
+                {
+                    materialEditor.TexturePropertySingleLine(
+                        new GUIContent("Stroke Map", "RG stroke normal, B paint height. Create sets with LoogaSoft > Graphics Pro > Impasto > Stroke Generator."),
+                        strokes);
+                }
+
+                DrawImpastoProperty(materialEditor, properties, "_ImpastoTileSize", "Stroke Tile Size", "World size in metres of one tile of strokes.");
+                DrawImpastoProperty(materialEditor, properties, "_ImpastoStrength", "Normal Strength", null);
+                DrawImpastoProperty(materialEditor, properties, "_ImpastoDetailReplacement", "Detail Replacement", "How much fine normal-map detail the paint replaces. The mesh shape always remains.");
+                DrawImpastoProperty(materialEditor, properties, "_ImpastoCavity", "Cavity Occlusion", null);
+                DrawImpastoProperty(materialEditor, properties, "_ImpastoRidgeGloss", "Ridge Gloss", "Smoothness added on paint ridges. Negative values make ridges matte.");
+                DrawImpastoProperty(materialEditor, properties, "_ImpastoCellsPerTile", "Cells Per Tile", "Hex cells per stroke tile. Each cell rotates and shifts the strokes.");
+                DrawImpastoProperty(materialEditor, properties, "_ImpastoRotation", "Stroke Rotation", null);
+                DrawImpastoProperty(materialEditor, properties, "_ImpastoOverlap", "Overlap Sharpness", null);
+                DrawImpastoProperty(materialEditor, properties, "_ImpastoSharpness", "Projection Sharpness", null);
+
+                EditorGUILayout.Space(2);
+                MaterialProperty parallax = FindProperty("_ImpastoParallax", properties, false);
+                if (parallax != null)
+                {
+                    materialEditor.ShaderProperty(parallax, new GUIContent("Deep Impasto", "Marches the paint height so it occludes itself and shifts the material's textures. Costs more; use it on close-up assets."));
+                    if (parallax.hasMixedValue || parallax.floatValue > 0.5f)
+                    {
+                        EditorGUI.indentLevel++;
+                        DrawImpastoProperty(materialEditor, properties, "_ImpastoParallaxDepth", "Paint Depth", "Depth in metres between the thickest and thinnest paint.");
+                        EditorGUI.indentLevel--;
+                    }
+                }
+                EditorGUI.indentLevel--;
+            });
+        }
+
+        private static void DrawImpastoProperty(MaterialEditor materialEditor, MaterialProperty[] properties, string name, string label, string tooltip)
+        {
+            MaterialProperty property = FindProperty(name, properties, false);
+            if (property != null)
+                materialEditor.ShaderProperty(property, new GUIContent(label, tooltip));
+        }
+
+        // Marks impasto materials in the stencil buffer (bit 3 over the Looga material bits) so the global pass
+        // leaves them alone, and fills an empty stroke map with the package default.
+        protected static void ValidateImpasto(Material material)
+        {
+            if (!material.HasProperty("_Impasto"))
+                return;
+
+            bool impasto = material.GetFloat("_Impasto") > 0.5f;
+            // The mask pass marks the material's pixels so the global Looga Impasto pass leaves them alone.
+            material.SetShaderPassEnabled("LoogaImpastoMask", impasto);
+
+            if (impasto && material.HasProperty("_ImpastoStrokeMap") && material.GetTexture("_ImpastoStrokeMap") == null)
+            {
+                string[] guids = AssetDatabase.FindAssets("LoogaImpastoStrokes t:Texture2D");
+                if (guids.Length > 0)
+                    material.SetTexture("_ImpastoStrokeMap", AssetDatabase.LoadAssetAtPath<Texture2D>(AssetDatabase.GUIDToAssetPath(guids[0])));
+            }
+        }
+
         private static void DrawRenderFaceProperty(MaterialProperty cull)
         {
             EditorGUI.showMixedValue = cull.hasMixedValue;

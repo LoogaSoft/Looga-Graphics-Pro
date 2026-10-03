@@ -110,6 +110,8 @@ namespace LoogaSoft.Lighting.Editor
 
             DrawBacklightingSection(materialEditor, properties, "LoogaLit_Backlighting");
 
+            DrawImpastoSection(materialEditor, properties, "LoogaLit_Impasto");
+
             Section("Advanced Options", "LoogaLit_Advanced", false, () =>
             {
                 if (specHighlights != null) materialEditor.ShaderProperty(specHighlights, "Specular Highlights");
@@ -119,6 +121,12 @@ namespace LoogaSoft.Lighting.Editor
                 materialEditor.EnableInstancingField();
                 materialEditor.RenderQueueField();
             });
+        }
+
+        public override void ValidateMaterial(Material material)
+        {
+            base.ValidateMaterial(material);
+            ValidateImpasto(material);
         }
     }
 }

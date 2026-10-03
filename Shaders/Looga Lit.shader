@@ -56,6 +56,20 @@ Shader "LoogaSoft/Lit"
 
         [ToggleOff] _SpecularHighlights("Specular Highlights", Float) = 1.0
         [ToggleOff] _EnvironmentReflections("Environment Reflections", Float) = 1.0
+
+        [Toggle(_LOOGA_IMPASTO)] _Impasto ("Impasto", Float) = 0.0
+        [NoScaleOffset] _ImpastoStrokeMap ("Stroke Map", 2D) = "gray" {}
+        _ImpastoTileSize ("Stroke Tile Size", Range(0.05, 20.0)) = 1.5
+        _ImpastoStrength ("Normal Strength", Range(0.0, 4.0)) = 1.0
+        _ImpastoDetailReplacement ("Detail Replacement", Range(0.0, 1.0)) = 0.6
+        _ImpastoSharpness ("Projection Sharpness", Range(1.0, 16.0)) = 4.0
+        _ImpastoCellsPerTile ("Cells Per Tile", Range(0.25, 4.0)) = 1.0
+        _ImpastoRotation ("Stroke Rotation", Range(0.0, 1.0)) = 1.0
+        _ImpastoOverlap ("Overlap Sharpness", Range(0.0, 1.0)) = 0.7
+        _ImpastoCavity ("Cavity Occlusion", Range(0.0, 1.0)) = 0.5
+        _ImpastoRidgeGloss ("Ridge Gloss", Range(-1.0, 1.0)) = 0.2
+        [Toggle(_LOOGA_IMPASTO_PARALLAX)] _ImpastoParallax ("Deep Impasto", Float) = 0.0
+        _ImpastoParallaxDepth ("Paint Depth", Range(0.0, 0.1)) = 0.01
     }
 
     SubShader
@@ -68,6 +82,7 @@ Shader "LoogaSoft/Lit"
         HLSLINCLUDE
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
         #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaModelParameters.hlsl"
+        #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaImpastoCommon.hlsl"
         CBUFFER_START(UnityPerMaterial)
             float4 _BaseColor;
             float _AlphaClip;
@@ -88,6 +103,7 @@ Shader "LoogaSoft/Lit"
             float _BacklightRimPower;
             float _BacklightDistortion;
             LOOGA_MODEL_PARAMETER_CBUFFER_FIELDS;
+            LOOGA_IMPASTO_CBUFFER_FIELDS;
             float4 _BaseMap_ST;
             float4 _BaseMap_TexelSize;
             float4 _BumpMap_TexelSize;
@@ -120,6 +136,8 @@ Shader "LoogaSoft/Lit"
             #pragma dynamic_branch_local_fragment _ _ENVIRONMENTREFLECTIONS_OFF
             #pragma shader_feature_local_fragment _USE_BACKLIGHTING
             #pragma shader_feature_local_fragment _EMISSION
+            #pragma shader_feature_local_fragment _LOOGA_IMPASTO
+            #pragma shader_feature_local_fragment _LOOGA_IMPASTO_PARALLAX
             #pragma multi_compile_fragment _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
             #pragma multi_compile _ EVALUATE_SH_MIXED EVALUATE_SH_VERTEX
             #pragma multi_compile_fragment _ _SCREEN_SPACE_IRRADIANCE
@@ -142,6 +160,7 @@ Shader "LoogaSoft/Lit"
             #define LOOGA_DISABLE_MODEL_REFLECTIONS 1
             #define LOOGA_DYNAMIC_MATERIAL_OPTIONS 1
             #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaLightingHelpers.hlsl"
+            #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaImpastoMaterial.hlsl"
 
             struct Attributes
             {
@@ -208,6 +227,19 @@ Shader "LoogaSoft/Lit"
             {
                 UNITY_SETUP_INSTANCE_ID(input);
                 FragmentOutput outGBuffer;
+                #if defined(_LOOGA_IMPASTO)
+                    float3 impastoNormal = NormalizeNormalPerPixel(input.normalWS);
+                    impastoNormal = (!isFrontFace && _BackfaceNormalMode > 0.5) ? -impastoNormal : impastoNormal;
+                    float3 impastoPosition = input.positionWS;
+                    float impastoLod = LoogaImpastoMaterialLod(LoogaImpastoStrokePosition(impastoPosition));
+                    #if defined(_LOOGA_IMPASTO_PARALLAX)
+                        // The paint displaces the material's textures, so every later sample uses the shifted UV.
+                        float2x3 impastoUvGradients = LoogaImpastoUvGradients(input.positionWS, input.uv, impastoNormal);
+                        float3 impastoOffset = LoogaImpastoParallaxOffset(impastoPosition, impastoNormal, impastoLod);
+                        input.uv += mul(impastoUvGradients, impastoOffset);
+                        impastoPosition += impastoOffset;
+                    #endif
+                #endif
                 half4 albedo = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv) * _BaseColor;
                 if (_AlphaClip > 0.5) clip(albedo.a - _Cutoff);
                 half4 normalSample = SAMPLE_TEXTURE2D(_BumpMap, sampler_BumpMap, input.uv);
@@ -245,6 +277,9 @@ Shader "LoogaSoft/Lit"
                 half3 normalWS = TransformTangentToWorld(normalTS, tangentToWorld);
                 normalWS = NormalizeNormalPerPixel(normalWS);
                 normalWS = (!isFrontFace && _BackfaceNormalMode > 0.5) ? -normalWS : normalWS;
+                #if defined(_LOOGA_IMPASTO)
+                    LoogaApplyImpasto(impastoPosition, impastoNormal, impastoLod, normalWS, occlusion, baseSmoothness);
+                #endif
                 ApplyLoogaDBuffer(input.positionCS, albedo.rgb, normalWS, metallic, specularF0, occlusion, baseSmoothness);
 
                 half3 emission = 0.0;
@@ -304,6 +339,8 @@ Shader "LoogaSoft/Lit"
             #pragma dynamic_branch_local_fragment _ _ENVIRONMENTREFLECTIONS_OFF
             #pragma shader_feature_local_fragment _USE_BACKLIGHTING
             #pragma shader_feature_local_fragment _EMISSION
+            #pragma shader_feature_local_fragment _LOOGA_IMPASTO
+            #pragma shader_feature_local_fragment _LOOGA_IMPASTO_PARALLAX
             #pragma multi_compile _ EVALUATE_SH_MIXED EVALUATE_SH_VERTEX
             #pragma multi_compile_fragment _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
             #pragma multi_compile_fragment _ _ADDITIONAL_LIGHTS
@@ -330,6 +367,7 @@ Shader "LoogaSoft/Lit"
             #define LOOGA_DYNAMIC_MATERIAL_OPTIONS 1
             #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaLightingHelpers.hlsl"
             #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaMasterLighting.hlsl"
+            #include "Packages/com.loogasoft.loogagraphicspro/Includes/LoogaImpastoMaterial.hlsl"
 
             struct AttributesForward
             {
@@ -393,6 +431,18 @@ Shader "LoogaSoft/Lit"
             half4 FragForward(VaryingsForward input, bool isFrontFace : SV_IsFrontFace) : SV_Target
             {
                 UNITY_SETUP_INSTANCE_ID(input);
+                #if defined(_LOOGA_IMPASTO)
+                    float3 impastoNormal = NormalizeNormalPerPixel(input.normalWS);
+                    impastoNormal = (!isFrontFace && _BackfaceNormalMode > 0.5) ? -impastoNormal : impastoNormal;
+                    float3 impastoPosition = input.positionWS;
+                    float impastoLod = LoogaImpastoMaterialLod(LoogaImpastoStrokePosition(impastoPosition));
+                    #if defined(_LOOGA_IMPASTO_PARALLAX)
+                        float2x3 impastoUvGradients = LoogaImpastoUvGradients(input.positionWS, input.uv, impastoNormal);
+                        float3 impastoOffset = LoogaImpastoParallaxOffset(impastoPosition, impastoNormal, impastoLod);
+                        input.uv += mul(impastoUvGradients, impastoOffset);
+                        impastoPosition += impastoOffset;
+                    #endif
+                #endif
                 half4 albedoSample = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv) * _BaseColor;
                 if (_AlphaClip > 0.5) clip(albedoSample.a - _Cutoff);
                 half3 albedo = albedoSample.rgb;
@@ -433,6 +483,9 @@ Shader "LoogaSoft/Lit"
                     #endif
                 #endif
 
+                #if defined(_LOOGA_IMPASTO)
+                    LoogaApplyImpasto(impastoPosition, impastoNormal, impastoLod, normalWS, occlusion, baseSmoothness);
+                #endif
                 ApplyLoogaDBuffer(input.positionCS, albedo, normalWS, metallic, specularF0, occlusion, baseSmoothness);
 
                 half perceptualRoughness = 1.0 - baseSmoothness;
@@ -561,6 +614,73 @@ Shader "LoogaSoft/Lit"
                     PackLoogaBacklightShape(_BacklightRimPower, _BacklightDistortion),
                     diffusionEnabled);
                 return output;
+            }
+            ENDHLSL
+        }
+
+        // Marks material impasto pixels in stencil so the global Looga Impasto pass skips them. URP's
+        // G-buffer pass overrides material stencil state, so the mark is drawn by the impasto feature.
+        Pass
+        {
+            Name "LoogaImpastoMask"
+            Tags { "LightMode" = "LoogaImpastoMask" }
+
+            ZWrite Off
+            ZTest LEqual
+            ColorMask 0
+            Cull [_Cull]
+            Stencil
+            {
+                Ref 8
+                Comp Always
+                Pass Replace
+                WriteMask 8
+            }
+
+            HLSLPROGRAM
+            #pragma target 4.5
+            #pragma multi_compile_instancing
+            #include_with_pragmas "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DOTS.hlsl"
+            #pragma vertex VertImpastoMask
+            #pragma fragment FragImpastoMask
+            #pragma shader_feature_local _LOOGA_IMPASTO
+
+            TEXTURE2D(_BaseMap); SAMPLER(sampler_BaseMap);
+
+            struct AttributesImpastoMask
+            {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+                float4 positionOS : POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            struct VaryingsImpastoMask
+            {
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+                float4 positionCS : SV_POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            VaryingsImpastoMask VertImpastoMask(AttributesImpastoMask input)
+            {
+                UNITY_SETUP_INSTANCE_ID(input);
+                VaryingsImpastoMask output = (VaryingsImpastoMask)0;
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
+                #if defined(_LOOGA_IMPASTO)
+                    output.positionCS = TransformObjectToHClip(input.positionOS.xyz);
+                #else
+                    output.positionCS = float4(0.0, 0.0, 0.0, 0.0);
+                #endif
+                output.uv = input.uv;
+                return output;
+            }
+
+            half4 FragImpastoMask(VaryingsImpastoMask input) : SV_Target
+            {
+                UNITY_SETUP_INSTANCE_ID(input);
+                if (_AlphaClip > 0.5)
+                    clip(SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv).a * _BaseColor.a - _Cutoff);
+                return 0.0;
             }
             ENDHLSL
         }

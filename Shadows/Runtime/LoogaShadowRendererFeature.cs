@@ -1222,7 +1222,9 @@ namespace LoogaSoft.Shadows
 
             public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
             {
-                const bool useRawShadowDepth = false;
+                // Blocker searches read stored depths. Where the atlas itself can be sampled as raw depth, that
+                // replaces a full-atlas copy every frame.
+                bool useRawShadowDepth = SupportsRawShadowDepthSampling();
                 if (_mainLight.light == null ||
                     _mainLightIndex < 0 ||
                     (!useRawShadowDepth && !EnsureCopyDepthPass()))
@@ -1691,9 +1693,17 @@ namespace LoogaSoft.Shadows
                 }
             }
 
+            // The resolve reads stored depth through its own point sampler, so the atlas's comparison sampler does
+            // not matter where textures and samplers are separate. Unity's flag also reports false for Direct3D 12.
             private static bool SupportsRawShadowDepthSampling()
             {
-                return SystemInfo.supportsRawShadowDepthSampling;
+                if (SystemInfo.supportsRawShadowDepthSampling)
+                    return true;
+
+                GraphicsDeviceType device = SystemInfo.graphicsDeviceType;
+                return device != GraphicsDeviceType.OpenGLCore &&
+                    device != GraphicsDeviceType.OpenGLES3 &&
+                    device != GraphicsDeviceType.Null;
             }
 
             internal static Vector4 GetCasterShadowBias(
@@ -1876,6 +1886,8 @@ namespace LoogaSoft.Shadows
                 public TextureHandle RawTarget;
                 public TextureHandle DenoiseTarget;
                 public TextureHandle Target;
+                public TextureHandle BlockerTarget;
+                public TextureHandle BlockerDenoiseTarget;
                 public TextureHandle CameraDepth;
                 public TextureHandle CameraNormals;
                 public Material Material;
@@ -1888,6 +1900,29 @@ namespace LoogaSoft.Shadows
                 public LoogaShadowNormalsSource NormalsSource;
                 public bool RequiresCameraNormals;
                 public bool NormalsOctEncoded;
+            }
+
+            // One bilateral denoise pass along a direction in pixels of the source texture.
+            private static void DenoiseInto(
+                UnsafeCommandBuffer command,
+                Material material,
+                RTHandle source,
+                RTHandle destination,
+                Vector4 direction)
+            {
+                command.SetRenderTarget(
+                    destination,
+                    RenderBufferLoadAction.DontCare,
+                    RenderBufferStoreAction.Store);
+                command.SetGlobalVector(LoogaShadowShaderIds.DenoiseDirection, direction);
+                Blitter.BlitTexture(command, source, Vector2.one, material, DenoiseShaderPass);
+            }
+
+            private static Vector4 GetTargetSize(RTHandle target)
+            {
+                int width = target.rt.width;
+                int height = target.rt.height;
+                return new Vector4(width, height, 1f / width, 1f / height);
             }
 
             private sealed class FullyLitPassData
@@ -2003,6 +2038,27 @@ namespace LoogaSoft.Shadows
                     wrapMode = TextureWrapMode.Clamp
                 });
 
+                // The blocker search only estimates penumbra widths, which its denoise smooths over many pixels
+                // anyway, so it runs at half resolution. B keeps each texel's eye depth for the upsample.
+                RenderTextureDescriptor halfDescriptor = descriptor;
+                halfDescriptor.width = Mathf.Max(1, (descriptor.width + 1) / 2);
+                halfDescriptor.height = Mathf.Max(1, (descriptor.height + 1) / 2);
+                halfDescriptor.graphicsFormat = GraphicsFormat.R16G16B16A16_SFloat;
+                TextureHandle blockerTarget = renderGraph.CreateTexture(new TextureDesc(halfDescriptor)
+                {
+                    name = "Looga Main Light Shadow Penumbra",
+                    clearBuffer = false,
+                    filterMode = FilterMode.Point,
+                    wrapMode = TextureWrapMode.Clamp
+                });
+                TextureHandle blockerDenoiseTarget = renderGraph.CreateTexture(new TextureDesc(halfDescriptor)
+                {
+                    name = "Looga Main Light Shadow Penumbra Reconstruction",
+                    clearBuffer = false,
+                    filterMode = FilterMode.Point,
+                    wrapMode = TextureWrapMode.Clamp
+                });
+
                 shadowFrameData.RawVisibility = rawTarget;
                 shadowFrameData.ResolvedVisibility = target;
 
@@ -2022,6 +2078,8 @@ namespace LoogaSoft.Shadows
                 passData.RawTarget = rawTarget;
                 passData.DenoiseTarget = denoiseTarget;
                 passData.Target = target;
+                passData.BlockerTarget = blockerTarget;
+                passData.BlockerDenoiseTarget = blockerDenoiseTarget;
                 passData.CameraDepth = cameraDepth;
                 passData.CameraNormals = cameraNormals;
                 passData.Material = _material;
@@ -2048,6 +2106,8 @@ namespace LoogaSoft.Shadows
                 builder.UseTexture(rawTarget, AccessFlags.ReadWrite);
                 builder.UseTexture(denoiseTarget, AccessFlags.ReadWrite);
                 builder.UseTexture(target, AccessFlags.ReadWrite);
+                builder.UseTexture(blockerTarget, AccessFlags.ReadWrite);
+                builder.UseTexture(blockerDenoiseTarget, AccessFlags.ReadWrite);
                 builder.UseTexture(cameraDepth, AccessFlags.Read);
                 if (_requiresCameraNormals)
                     builder.UseTexture(cameraNormals, AccessFlags.Read);
@@ -2068,6 +2128,8 @@ namespace LoogaSoft.Shadows
                     RTHandle rawTarget = data.RawTarget;
                     RTHandle denoiseTarget = data.DenoiseTarget;
                     RTHandle target = data.Target;
+                    RTHandle blockerTarget = data.BlockerTarget;
+                    RTHandle blockerDenoiseTarget = data.BlockerDenoiseTarget;
                     RTHandle cameraDepth = data.CameraDepth;
                     RTHandle cameraNormals = data.RequiresCameraNormals
                         ? data.CameraNormals
@@ -2099,46 +2161,31 @@ namespace LoogaSoft.Shadows
                     context.cmd.SetGlobalTexture(LoogaShadowShaderIds.VirtualShadowAtlas, clipmap0);
                     context.cmd.SetGlobalTexture(LoogaShadowShaderIds.VirtualShadowDepthAtlas, depthClipmap0);
                     ApplySettings(context.cmd, data);
+                    // Half resolution: blocker search, then its denoise. The passes end in blockerTarget.
+                    context.cmd.SetRenderTarget(
+                        blockerTarget,
+                        RenderBufferLoadAction.DontCare,
+                        RenderBufferStoreAction.Store);
+                    context.cmd.SetGlobalVector(
+                        LoogaShadowShaderIds.ResolveTargetSize,
+                        GetTargetSize(blockerTarget));
                     Blitter.BlitTexture(context.cmd, depthClipmap0, Vector2.one, data.Material, ResolveShaderPass);
-                    context.cmd.SetRenderTarget(
-                        denoiseTarget,
-                        RenderBufferLoadAction.DontCare,
-                        RenderBufferStoreAction.Store);
-                    context.cmd.SetGlobalVector(
-                        LoogaShadowShaderIds.DenoiseDirection,
-                        new Vector4(1f, 0f, 0f, 0f));
-                    Blitter.BlitTexture(context.cmd, rawTarget, Vector2.one, data.Material, DenoiseShaderPass);
-                    context.cmd.SetRenderTarget(
-                        target,
-                        RenderBufferLoadAction.DontCare,
-                        RenderBufferStoreAction.Store);
-                    context.cmd.SetGlobalVector(
-                        LoogaShadowShaderIds.DenoiseDirection,
-                        new Vector4(0f, 1f, 0f, 0f));
-                    Blitter.BlitTexture(context.cmd, denoiseTarget, Vector2.one, data.Material, DenoiseShaderPass);
-                    context.cmd.SetRenderTarget(
-                        denoiseTarget,
-                        RenderBufferLoadAction.DontCare,
-                        RenderBufferStoreAction.Store);
-                    context.cmd.SetGlobalVector(
-                        LoogaShadowShaderIds.DenoiseDirection,
-                        new Vector4(2f, 0f, 0f, 0f));
-                    Blitter.BlitTexture(context.cmd, target, Vector2.one, data.Material, DenoiseShaderPass);
-                    context.cmd.SetRenderTarget(
-                        target,
-                        RenderBufferLoadAction.DontCare,
-                        RenderBufferStoreAction.Store);
-                    context.cmd.SetGlobalVector(
-                        LoogaShadowShaderIds.DenoiseDirection,
-                        new Vector4(0f, 2f, 0f, 0f));
-                    Blitter.BlitTexture(context.cmd, denoiseTarget, Vector2.one, data.Material, DenoiseShaderPass);
+                    DenoiseInto(context.cmd, data.Material, blockerTarget, blockerDenoiseTarget, new Vector4(1f, 0f, 0f, 0f));
+                    DenoiseInto(context.cmd, data.Material, blockerDenoiseTarget, blockerTarget, new Vector4(0f, 1f, 0f, 0f));
+                    DenoiseInto(context.cmd, data.Material, blockerTarget, blockerDenoiseTarget, new Vector4(2f, 0f, 0f, 0f));
+                    DenoiseInto(context.cmd, data.Material, blockerDenoiseTarget, blockerTarget, new Vector4(0f, 2f, 0f, 0f));
+
+                    // Full resolution: filter with the upsampled penumbra, then denoise it.
                     context.cmd.SetRenderTarget(
                         rawTarget,
                         RenderBufferLoadAction.DontCare,
                         RenderBufferStoreAction.Store);
+                    context.cmd.SetGlobalVector(
+                        LoogaShadowShaderIds.ResolveTargetSize,
+                        GetTargetSize(rawTarget));
                     Blitter.BlitTexture(
                         context.cmd,
-                        target,
+                        blockerTarget,
                         Vector2.one,
                         data.Material,
                         RefilterShaderPass);
